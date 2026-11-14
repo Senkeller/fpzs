@@ -21,6 +21,10 @@ try { sea = require('node:sea'); } catch (e) { /* 老版本 Node 无 node:sea */
 const IS_SEA = !!(sea && sea.isSea());
 const ROOT = __dirname;
 
+// 单实例自检用的健康端点（不参与资源服务，不会被真实文件覆盖）
+const HEALTH_PATH = '/__healthz';
+const HEALTH_BODY = 'invoice-print-helper-ok';
+
 function readAsset(rel) {
   if (IS_SEA) {
     // SEA assets 的 key 统一用正斜杠相对路径
@@ -63,6 +67,11 @@ const server = http.createServer((req, res) => {
     const url = req.url || '/';
     const legacy = legacyRedirect(url);
     if (legacy) return redirect(res, 301, legacy);
+
+    // 单实例自检端点：仅本程序会返回固定串，用于探测端口是否已被本程序占用
+    if (url === HEALTH_PATH) {
+      return send(res, 200, 'text/plain; charset=utf-8', Buffer.from(HEALTH_BODY, 'utf8'));
+    }
 
     const rel = toAsset(url);
     if (!rel) return send(res, 400, 'text/plain; charset=utf-8', Buffer.from('Bad Request', 'utf8'));
@@ -114,12 +123,16 @@ const BASE_PORT = Number(process.env.PORT) || 8000;
 const MAX_TRY = 20;
 let attempt = 0;
 
-function listen(port) {
+// 默认单实例：重复启动不新开服务/窗口，而是复用已在 8000 运行的实例并打开浏览器。
+// 设 MULTI_INSTANCE=1 可恢复「端口被占就顺延」的旧多开行为。
+const SINGLE_INSTANCE = !process.env.MULTI_INSTANCE;
+
+function startServer(port) {
   server.once('error', (err) => {
     if (err.code === 'EADDRINUSE' && attempt < MAX_TRY) {
       attempt += 1;
       console.log('Port ' + port + ' is in use, trying ' + (port + 1) + ' ...');
-      listen(port + 1);
+      startServer(port + 1);
     } else {
       console.error('Cannot start server: ' + err.message);
       process.exitCode = 1;
@@ -138,4 +151,28 @@ function listen(port) {
   });
 }
 
-listen(BASE_PORT);
+// 探测 BASE_PORT 是否已被「本程序」占用（靠健康端点的固定返回串识别，
+// 避免误判别的程序恰好占了 8000）。命中则视为已有实例在跑。
+function probeExistingInstance(port, cb) {
+  const req = http.get({ host: '127.0.0.1', port: port, path: HEALTH_PATH, timeout: 800 }, (res) => {
+    let data = '';
+    res.on('data', (c) => { data += c; });
+    res.on('end', () => cb(data.trim() === HEALTH_BODY));
+  });
+  req.on('error', () => cb(false));
+  req.on('timeout', () => { req.destroy(); cb(false); });
+}
+
+if (SINGLE_INSTANCE) {
+  probeExistingInstance(BASE_PORT, (isOurs) => {
+    if (isOurs) {
+      const url = 'http://127.0.0.1:' + BASE_PORT + '/';
+      console.log('Invoice Print Helper 已在运行（端口 ' + BASE_PORT + '）。已为你打开浏览器窗口，无需再开新实例。');
+      if (!process.env.NO_BROWSER) openBrowser(url);
+      process.exit(0);
+    }
+    startServer(BASE_PORT);
+  });
+} else {
+  startServer(BASE_PORT);
+}
