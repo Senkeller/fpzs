@@ -1765,7 +1765,10 @@
             let hasStats = false;
             for (const el of document.querySelectorAll('[data-slot="card"]')) {
               const t = el.textContent || '';
-              if (t.includes('发票数量') || t.includes('总金额')) { hasStats = true; break; }
+              // 与 addExpenseReportCard / head 的 findStatsCard 保持一致的判定：
+              // 统计卡片标题恒为「发票统计」（ece2d7f 重写内容后不再含「发票数量/总金额」，
+              // 若只认这两个词会误判卡片消失并把报销单卡片删掉）。
+              if (t.includes('发票统计') || t.includes('发票数量') || t.includes('总金额')) { hasStats = true; break; }
             }
             const card = document.querySelector('.expense-report-operations-card');
             if (hasStats && !card) {

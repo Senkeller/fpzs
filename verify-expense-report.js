@@ -215,6 +215,8 @@ check('确认窗口含实时预览与问题定位', mainHtml.includes('{ preview
 check('人工修正持久化到下次生成',
   mainHtml.includes('saveExpenseReportOverrides') && mainHtml.includes('applyExpenseReportOverrides'));
 check('日期格式化改用本地年月日（修复少一天）', mainHtml.includes("getMonth() + 1).padStart(2, '0')"));
+check('报销单卡片观察器与新统计卡片兼容（认「发票统计」标题，不被误删）',
+  mainHtml.includes("发票统计') || t.includes('发票数量')"));
 
 /* ---------- 6. 输出静态预览 ---------- */
 const previewDir = path.join(__dirname, '.workbuddy', 'preview');
