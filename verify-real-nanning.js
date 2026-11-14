@@ -178,9 +178,9 @@ check('categoryManual 标记为 true', dF.categoryManual === true);
 check('75 元从「车船费-其他」移至「普票费」', mF.totals.ticket === 7500 && mF.totals.transportOther === 0,
   'ticket=' + (mF.totals.ticket / 100) + ' other=' + (mF.totals.transportOther / 100));
 check('总计不受影响（金额不丢、仍 410.55）', mF.grandTotal === 41055, String(mF.grandTotal / 100));
-// analyzeExpenseReport 也应反映手动列
+// analyzeExpenseReport 也应反映手动列（category 来自 model.stats.details，与 buildTripModel 一致）
 const aF = T.analyzeExpenseReport(ovData, CFG);
-check('analyzeExpenseReport 返回该票据 category=ticket', aF.issues.find(x => false) === undefined && aF.model.stats.details[0].category === 'ticket');
+check('analyzeExpenseReport 反映手动列 category=ticket', aF.model.stats.details[0].category === 'ticket', aF.model.stats.details[0].category);
 // 删除手动覆盖后回到自动归类
 delete bus.__reportCategory;
 const mF2 = T.buildTripModel(ovData, CFG);
