@@ -6,11 +6,17 @@
  *
  * 业务规则：
  *   - 用户指定出差起止日期，范围内每天一行，补贴默认 50 元/天；
+ *     未指定时，区间按「行程单的真实出差日」推断（绝不用未配行程单发票的开票日期，
+ *     否则会把补贴算到开票日上——这是已修复的 bug）；
  *   - 发票金额按项目名归到对应费用列（关键词可在 config.keywords 里改）；
  *   - 行程单不是发票：仅用于「金额核对 + 提供真实乘车日期」，不重复计金额；
  *     单张行程单金额 == 发票金额，或多张行程单金额之和 == 发票金额时配对成功，
  *     配对成功后按行程单日期归行；否则退回开票日期；
- *   - 没有行程单且开票日期超出出差范围的票据，单列为「超范围票据」（不计补贴）。
+ *   - 没有行程单且开票日期超出出差范围的票据，单列为「超范围票据」（不计补贴）；
+ *   - inv.__reportDate（生成前人工确认的归行日期）优先级最高：
+ *     存在时直接按该日期归行，用于在生成前修正识别错误的票据日期；
+ *   - inv.__reportCategory（生成前人工选定的「填入位置/费用列」）优先级最高：
+ *     存在时覆盖关键词自动归类，用于在生成前修正识别错误/归类模糊的发票费用列。
  *
  * 浏览器：window.__expenseReportTable
  * Node：require('./expense-report-table.js')  （供验证脚本直接调用 buildTripModel）
@@ -49,8 +55,19 @@
 
   // 数值列顺序 = 表格列顺序（不含小计）
   var COLS = ['ticket', 'taxi', 'transportOther', 'lodging', 'allowance', 'refund'];
+  var COL_LABEL = {
+    ticket: '普票费', taxi: '打的费', transportOther: '车船费-其他',
+    lodging: '住宿费', allowance: '补贴', refund: '其他（退票费）'
+  };
+  // 可在确认弹窗里手动指定的「发票填入费用列」（补贴由天数决定，不允许发票占位）
+  var SELECTABLE_CATS = ['ticket', 'taxi', 'transportOther', 'lodging', 'refund'];
 
   function pad2(n) { return n < 10 ? '0' + n : '' + n; }
+  // 'YYYY-MM-DD' → 原件口径 'YYYY/M/D'
+  function cnDayKey(k) {
+    var d = parseDay(k);
+    return d ? d.getFullYear() + '/' + (d.getMonth() + 1) + '/' + d.getDate() : String(k || '');
+  }
 
   function parseDay(v) {
     if (!v) return null;
@@ -87,9 +104,16 @@
   function sumCell(c) { return COLS.reduce(function (s, k) { return s + c[k]; }, 0); }
 
   function categorize(inv, cfg) {
+    // 人工指定优先：确认弹窗里用户手动选了「填入位置（费用列）」时，
+    // 直接采用，避免关键词误判。仅接受合法可选类别，防止脏数据污染模型。
+    if (inv && inv.__reportCategory && SELECTABLE_CATS.indexOf(inv.__reportCategory) !== -1) {
+      return inv.__reportCategory;
+    }
     var text = ((inv && (inv.projectName || inv.itemName || inv.name) || '') + ' ' +
       ((inv && inv.fileName) || '')).toLowerCase();
-    var kw = cfg.keywords;
+    // 汽车票 / 长途汽车票：归「车船费-其他」（与莫干山报销模板一致，普票费留空）
+    if (/汽车票|长途汽车/.test(text)) return 'transportOther';
+    var kw = (cfg && cfg.keywords) ? cfg.keywords : DEFAULT_CONFIG.keywords;
     var groups = ['refund', 'lodging', 'taxi', 'ticket', 'transportOther'];
     for (var i = 0; i < groups.length; i++) {
       var g = groups[i];
@@ -146,10 +170,21 @@
       };
     });
 
-    // 出差起止日期：优先用户选择，其次按票据日期推断
+    // 出差起止日期：优先用户选择，否则按「真实出差日」推断。
+    // 关键修复：没有行程单的「待定」发票，其开票日期只是收据打印日，
+    // 不能用来推断 / 撑大出差区间，否则会把补贴算到开票日上（bug）。
+    // 仅在没有行程单、无法从真实出差日推断时，才退回发票开票日期。
     var datePool = [];
-    invoices.forEach(function (inv) { var d = parseDay(inv.issueDate || inv.date); if (d) datePool.push(d); });
-    tripCandidates.forEach(function (t) { var d = parseDay(t.date); if (d) datePool.push(d); });
+    tripCandidates.forEach(function (t) {
+      var d = parseDay(t.date);
+      if (d) datePool.push(d);
+    });
+    if (datePool.length === 0) {
+      invoices.forEach(function (inv) {
+        var d = parseDay(inv.issueDate || inv.date);
+        if (d) datePool.push(d);
+      });
+    }
     var today = new Date();
     today = new Date(today.getFullYear(), today.getMonth(), today.getDate());
     var start = parseDay(cfg.startDate) ||
@@ -203,31 +238,42 @@
     invoices.forEach(function (inv) {
       var amt = Math.round((parseFloat(inv.amount) || 0) * 100);
       var cat = categorize(inv, cfg);
+      // 仍走一遍行程单核对：消耗已配对的行程单，保证金额统计口径不变。
       var matches = matchTrips(inv);
+      if (matches && matches.length) stats.matchedInvoices += 1;
+      // 人工确认日期优先级最高，用于生成前修正识别错误的票据日期。
+      var manualDay = parseDay(inv.__reportDate);
       var pieces;
-      if (matches && matches.length) {
-        stats.matchedInvoices += 1;
+      if (manualDay) {
+        pieces = [{ date: dayKey(manualDay), cents: amt, by: '人工确认日期' }];
+      } else if (matches && matches.length) {
         pieces = matches;
       } else {
         var d = parseDay(inv.issueDate || inv.date) || start;
         pieces = [{ date: dayKey(d), cents: amt, by: '开票日期' }];
       }
+      var outFlag = false;
       pieces.forEach(function (p) {
         var inRange = Object.prototype.hasOwnProperty.call(cells, p.date);
         var target = inRange ? cells[p.date] : outCell;
         target[cat] += p.cents;
         target.count += 1;
         if (!inRange) {
+          outFlag = true;
           stats.outOfRangeCount += 1;
           outDates[p.date] = (outDates[p.date] || 0) + 1;
         }
       });
       stats.details.push({
+        index: all.indexOf(inv),
         fileName: inv.fileName || '',
         category: cat,
+        categoryManual: !!(inv && inv.__reportCategory && SELECTABLE_CATS.indexOf(inv.__reportCategory) !== -1),
         by: pieces[0].by,
         dates: pieces.map(function (p) { return p.date; }),
-        cents: amt
+        cents: amt,
+        outOfRange: outFlag,
+        manual: !!manualDay
       });
     });
 
@@ -270,7 +316,7 @@
    * 版式蓝本：差旅费用报销清单（内部表单模板）
    *   A4 纵向；右上「编号：YF-FBCW10-2022」；黑体 16pt 居中标题
    *   「出差记录及费用报销清单」；下一行「出差人：…   2026 年 9月6 ~ 9月10日」；
-   *   10 列细线表、三行表头（车船费跨两行三列，第三行才是普票费/打的费/其他）；
+   *   10 列细线表、两行表头（车船费跨三列，第二行才是普票费/打的费/其他）；
    *   数据行 10.5pt 宋体、每天重复填地点与原因、金额空值留空、小计列留空；
    *   合计行加粗且每列都写数（含 0）。原件无记账凭证附件、大写金额与签章栏。
    */
@@ -278,6 +324,8 @@
     var model = buildTripModel(invoiceData, cfgInput);
     var cfg = model.config;
     var border = '#000000';
+    // 确认弹窗内的预览：去掉 A4 底部大片留白，只保留表格本体（正式 PDF 版式不受影响）
+    var previewMode = !!(helpers && helpers.preview);
 
     // Word tblGrid 列宽（twips）换算成百分比，保持原件各列比例
     var colWidths = [11.9, 12.0, 12.0, 8.3, 8.3, 6.3, 10.5, 8.5, 12.4, 8.7];
@@ -295,25 +343,23 @@
     var tdRight = base + 'text-align:right;font-size:14px;padding-right:7px;';
     var tdBold = base + 'font-weight:bold;font-size:14px;';
 
+    // 两行表头：第一行 车船费 跨 3 列，住宿费/补贴/其他(退票费)/小计 跨两行；
+    // 第二行才是 车船费 下的 普票费/打的费/其他 三个子列。
     var thead = '<thead>' +
       '<tr style="height:24px;">' +
         '<th rowspan="2" style="' + thBig + '">日期</th>' +
         '<th rowspan="2" style="' + thBig + '">出差地点</th>' +
         '<th rowspan="2" style="' + thBig + '">出差原因</th>' +
-        '<th colspan="3" rowspan="2" style="' + thBig + '">车船费</th>' +
+        '<th colspan="3" style="' + thBig + '">车船费</th>' +
         '<th rowspan="2" style="' + thSmall + '">住宿费</th>' +
         '<th rowspan="2" style="' + thSmall + '">补贴</th>' +
-        '<th style="' + thSmall + '">其他</th>' +
+        '<th rowspan="2" style="' + thSmall + '">其他<br>（退票费）</th>' +
         '<th rowspan="2" style="' + thSmall + '">小计</th>' +
       '</tr>' +
-      '<tr style="height:22px;"><th style="' + thSmall + '">（退票费）</th></tr>' +
       '<tr style="height:22px;">' +
-        '<th style="' + thSub + '"></th><th style="' + thSub + '"></th><th style="' + thSub + '"></th>' +
         '<th style="' + thSub + '">普票费</th>' +
         '<th style="' + thSub + '">打的费</th>' +
         '<th style="' + thSub + '">其他</th>' +
-        '<th style="' + thSub + '"></th><th style="' + thSub + '"></th>' +
-        '<th style="' + thSub + '"></th><th style="' + thSub + '"></th>' +
       '</tr></thead>';
 
     // 原件日期写作 2026/9/6（月日不补零）
@@ -383,8 +429,11 @@
       if (isLast) body += totalRow;
 
       // A4 = 210 × 297mm ≈ 794 × 1123px @96dpi；页边距 20mm ≈ 76px
-      return '<div class="expenseReportPage" style="' +
-        'width:794px;height:1123px;background:#fff;padding:76px;' +
+      var pageStyle = previewMode
+        ? 'width:794px;height:auto;background:#fff;padding:24px;'
+        : 'width:794px;height:1123px;background:#fff;padding:76px;';
+      return '<div class="expenseReportPage' + (previewMode ? ' expenseReportPagePreview' : '') + '" style="' +
+        pageStyle +
         'font-family:SimSun,宋体,serif;color:#000;box-sizing:border-box;' +
         'display:flex;flex-direction:column;">' +
         '<div style="text-align:right;font-size:14px;line-height:1.5;height:22px;">' +
@@ -404,13 +453,45 @@
     var allPagesHTML = chunks.map(function (c, i) {
       return buildPage(c, i, i === chunks.length - 1);
     }).join('');
+
     return '<div id="expenseReport">' + allPagesHTML + '</div>';
+  }
+
+  /*
+   * 生成前诊断：列出日期超出出差范围的票据，按原始 invoiceData 索引定位。
+   * 确认弹窗用它高亮问题行、控制「确认生成」按钮；Node 回归脚本也直接调用。
+   */
+  function analyzeExpenseReport(invoiceData, cfgInput) {
+    var model = buildTripModel(invoiceData, cfgInput);
+    var issues = [];
+    (model.stats.details || []).forEach(function (d) {
+      if (!d.outOfRange) return;
+      issues.push({
+        index: d.index,
+        fileName: d.fileName,
+        category: d.category,
+        dates: d.dates.slice(),
+        amount: d.cents / 100,
+        manual: !!d.manual,
+        by: d.by
+      });
+    });
+    return {
+      model: model,
+      issues: issues,
+      start: model.start,
+      end: model.end,
+      dayKeys: model.dayRows.map(function (r) { return r.key; })
+    };
   }
 
   return {
     DEFAULT_CONFIG: DEFAULT_CONFIG,
     COLS: COLS,
+    COL_LABEL: COL_LABEL,
+    SELECTABLE_CATS: SELECTABLE_CATS,
     buildTripModel: buildTripModel,
+    analyzeExpenseReport: analyzeExpenseReport,
     generateExpenseReportHTML: generateExpenseReportHTML,
     utils: { parseDay: parseDay, dayKey: dayKey, slashDate: slashDate, categorize: categorize, fmt: fmt }
   };

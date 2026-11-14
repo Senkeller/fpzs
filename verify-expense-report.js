@@ -118,7 +118,7 @@ check('表头 7 个跨 2 行单元格', (htmlA.match(/rowspan="2"/g) || []).leng
 check('表头含「其他（退票费）」', htmlA.includes('（退票费）'));
 check('日期格式 2026/10/19', htmlA.includes('2026/10/19') && htmlA.includes('2026/10/23'));
 check('合计行含 0 与 250', /合计<\/td>/.test(htmlA) && htmlA.includes('>250<'));
-check('版式对齐参考清单：标题 / 编号 / 出差人 / 三行表头',
+check('版式对齐参考清单：标题 / 编号 / 出差人 / 两行表头',
   htmlA.includes('出差记录及费用报销清单') && htmlA.includes('编号：YF-FBCW10-2022') &&
   htmlA.includes('出差人：') && htmlA.includes('（退票费）') &&
   (htmlA.match(/<thead>/g) || []).length === 1);
@@ -147,7 +147,76 @@ const longCfg = { startDate: '2026-10-01', endDate: '2026-10-20', dailyAllowance
 const htmlLong = T.generateExpenseReportHTML([], null, longCfg, { numberToChinese: toChinese });
 check('20 天自动分 3 页', (htmlLong.match(/class="expenseReportPage"/g) || []).length === 3);
 
-/* ---------- 4. 输出静态预览 ---------- */
+/* ---------- 4. 生成前确认：人工归行日期 / 超范围诊断 ---------- */
+console.log('\n=== D. 生成前强制确认逻辑 ===');
+const CFG2 = { startDate: '2026-10-19', endDate: '2026-10-23', dailyAllowance: 50, location: '南宁', reason: '做实验' };
+const outInvoices = [
+  { fileName: '网约车发票.pdf', amount: 30.25, issueDate: d(2026, 10, 25), projectName: '客运服务费' },
+  { fileName: '行程单.pdf', amount: 30.25, isTrip: true,
+    trip: { isTrip: true, primaryDate: '2026-10-25', dates: ['2026-10-25'], amount: 30.25 } },
+  { fileName: '火车票.pdf', amount: 100, issueDate: d(2026, 10, 20), projectName: '火车票 南宁东-广州南' }
+];
+const previewHelpers = { numberToChinese: toChinese, preview: true };
+const a1 = T.analyzeExpenseReport(outInvoices, CFG2);
+check('诊断出 1 笔超范围票据', a1.issues.length === 1, 'issues=' + a1.issues.length);
+check('问题票据定位到原始索引 0', a1.issues[0].index === 0);
+check('问题票据日期 2026-10-25', a1.issues[0].dates[0] === '2026-10-25');
+check('问题票据金额 30.25', a1.issues[0].amount === 30.25);
+check('预览 HTML 含超范围提示行（对应确认窗口截图）',
+  T.generateExpenseReportHTML(outInvoices, null, CFG2, previewHelpers).includes('超范围票据'));
+check('预览为紧凑版式，正式版式仍是 A4 整页',
+  !T.generateExpenseReportHTML(outInvoices, null, CFG2, previewHelpers).includes('height:1123px') &&
+  T.generateExpenseReportHTML(outInvoices, null, CFG2, { numberToChinese: toChinese }).includes('width:794px;height:1123px'));
+
+// 用户在确认窗口把归行日期改到出差范围内
+const fixed = outInvoices.map(inv => Object.assign({}, inv));
+fixed[0].__reportDate = '2026-10-21';
+const a2 = T.analyzeExpenseReport(fixed, CFG2);
+check('人工指定归行日期后超范围清零', a2.issues.length === 0 && a2.model.outRow === null);
+check('金额按人工日期归入 10/21 打的费', a2.model.dayRows.find(r => r.key === '2026-10-21').cells.taxi === 3025);
+check('人工日期优先于行程单配对，但金额核对仍成立', a2.model.stats.matchedInvoices === 1);
+check('修正前后合计金额不变（不丢钱）', a1.model.grandTotal === a2.model.grandTotal);
+check('明细标记人工确认来源', a2.model.stats.details[0].manual === true && a2.model.stats.details[0].by === '人工确认日期');
+check('修正后预览不再出现超范围提示',
+  !T.generateExpenseReportHTML(fixed, null, CFG2, previewHelpers).includes('超范围票据'));
+
+const bad = outInvoices.map(inv => Object.assign({}, inv));
+bad[0].__reportDate = '不是日期';
+const a3 = T.analyzeExpenseReport(bad, CFG2);
+check('非法人工日期不会覆盖原口径', a3.issues.length === 1 && a3.model.stats.details[0].manual === false);
+
+const a4 = T.analyzeExpenseReport(outInvoices, Object.assign({}, CFG2, { endDate: '2026-10-25' }));
+check('调整出差范围也能消除超范围', a4.issues.length === 0);
+
+const a5 = T.analyzeExpenseReport([
+  { fileName: 'a.pdf', amount: 10, issueDate: d(2026, 11, 1), projectName: '住宿费' },
+  { fileName: 'b.pdf', amount: 20, issueDate: d(2026, 11, 2), projectName: '住宿费' }
+], CFG2);
+check('多笔超范围分别定位到索引 0 / 1',
+  a5.issues.length === 2 && a5.issues[0].index === 0 && a5.issues[1].index === 1);
+
+const tripFixed = outInvoices.map(inv => Object.assign({}, inv, {
+  trip: inv.trip ? Object.assign({}, inv.trip) : null
+}));
+tripFixed[1].trip.primaryDate = '2026-10-22';
+const a6 = T.analyzeExpenseReport(tripFixed, CFG2);
+check('改行程单日期也能让配对发票回到范围内',
+  a6.issues.length === 0 && a6.model.dayRows.find(r => r.key === '2026-10-22').cells.taxi === 3025);
+
+/* ---------- 5. 页面生成链路静态约束 ---------- */
+console.log('\n=== E. main.html 生成链路 ===');
+const mainHtml = fs.readFileSync(path.join(__dirname, 'main.html'), 'utf8');
+check('两条入口统一走同一个确认窗口',
+  mainHtml.includes('window.generateExpenseReportManual = generateExpenseReport;') &&
+  !mainHtml.includes('async function generateExpenseReportManual()'));
+check('生成前强制调用确认窗口', /const confirmedData = await showExpenseReportConfirmDialog/.test(mainHtml));
+check('未修正超范围时确认按钮被禁用', mainHtml.includes('confirmBtn.disabled = blocked'));
+check('确认窗口含实时预览与问题定位', mainHtml.includes('{ preview: true }') && mainHtml.includes('定位第 1 笔'));
+check('人工修正持久化到下次生成',
+  mainHtml.includes('saveExpenseReportOverrides') && mainHtml.includes('applyExpenseReportOverrides'));
+check('日期格式化改用本地年月日（修复少一天）', mainHtml.includes("getMonth() + 1).padStart(2, '0')"));
+
+/* ---------- 6. 输出静态预览 ---------- */
 const previewDir = path.join(__dirname, '.workbuddy', 'preview');
 fs.mkdirSync(previewDir, { recursive: true });
 const preview = `<!doctype html>
@@ -173,7 +242,7 @@ const preview = `<!doctype html>
 </body></html>`;
 const previewPath = path.join(previewDir, 'expense-report-preview.html');
 fs.writeFileSync(previewPath, preview, 'utf8');
-console.log('\n=== D. 预览文件 ===');
+console.log('\n=== F. 预览文件 ===');
 console.log('  ' + previewPath);
 
 console.log('\n=== 结果 ===');

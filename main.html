@@ -521,55 +521,83 @@
 
       // 差旅费报销单：表格生成已拆到 static/js/custom/expense-report-table.js
       // 保留原函数签名，自动/手动生成两条链路无需改动。
-      function generateExpenseReportHTML(invoiceData, totalAmountOverride, tripConfig) {
+      function generateExpenseReportHTML(invoiceData, totalAmountOverride, tripConfig, options) {
         const api = window.__expenseReportTable;
         if (!api) throw new Error("差旅报销单模块未加载：static/js/custom/expense-report-table.js");
         const uiCfg = (typeof readTripConfigFromUI === "function") ? readTripConfigFromUI() : {};
         const cfg = Object.assign({}, window.__tripExpenseConfig || {}, uiCfg, tripConfig || {});
-        return api.generateExpenseReportHTML(invoiceData, totalAmountOverride, cfg, { numberToChinese });
+        return api.generateExpenseReportHTML(invoiceData, totalAmountOverride, cfg,
+          { numberToChinese: numberToChinese, preview: !!(options && options.preview) });
       }
 
-      async function generateExpenseReport() {
+      // ------------------------------------------------------------------
+      // 生成报销单：两个入口统一走「先人工确认，再生成」
+      // 确认过的人工修正（项目名 / 金额 / 归行日期）会缓存在 window 上，
+      // 下次重新从 React 取数后依旧生效，不会一刷新就打回原形。
+      // ------------------------------------------------------------------
+      window.__expenseReportOverrides = window.__expenseReportOverrides || {};
+
+      function expenseOverrideKey(inv, idx) {
+        return String((inv && inv.fileName) || '') + '::' + idx;
+      }
+
+      function applyExpenseReportOverrides(invoiceData) {
+        const ov = window.__expenseReportOverrides || {};
+        (invoiceData || []).forEach((inv, idx) => {
+          const o = ov[expenseOverrideKey(inv, idx)];
+          if (!o) return;
+          if (o.projectName != null) { inv.projectName = o.projectName; inv.itemName = o.itemName; }
+          if (o.amount != null) inv.amount = o.amount;
+          if (o.reportDate) inv.__reportDate = o.reportDate;
+          else delete inv.__reportDate;
+          if (o.category) inv.__reportCategory = o.category;
+          else delete inv.__reportCategory;
+          if (o.tripDate && inv.trip) inv.trip = Object.assign({}, inv.trip, { primaryDate: o.tripDate });
+        });
+        return invoiceData;
+      }
+
+      function saveExpenseReportOverrides(invoiceData) {
+        const ov = {};
+        (invoiceData || []).forEach((inv, idx) => {
+          ov[expenseOverrideKey(inv, idx)] = {
+            projectName: inv.projectName, itemName: inv.itemName, amount: inv.amount,
+            reportDate: inv.__reportDate || '',
+            category: inv.__reportCategory || '',
+            tripDate: (inv.trip && inv.trip.primaryDate) || ''
+          };
+        });
+        window.__expenseReportOverrides = ov;
+      }
+
+      function assertReportLibs() {
+        if (typeof html2canvas === 'undefined') throw new Error('html2canvas 库未加载');
+        if (!window.jspdf) throw new Error('jsPDF 库未加载');
+        if (!window.PDFLib) throw new Error('PDF-lib 库未加载');
+        if (!window.__expenseReportTable) throw new Error('差旅报销单模块未加载');
+      }
+
+      // 上传缓存里的 PDF 重新识别一遍，确认弹窗不显示过期数据
+      async function refreshInvoiceRecognition() {
+        if (!window.__fileDebugCache || window.__fileDebugCache.size === 0) return;
+        const rePending = [];
+        for (const [name, file] of window.__fileDebugCache.entries()) {
+          if (name.toLowerCase().endsWith('.pdf') &&
+            !name.includes('_副本') && !/^报销单[_-]|^报销单\.pdf$/i.test(name) && !name.startsWith('000_')) {
+            rePending.push(extractInvoiceDataFromPdf(name, file).then(d => { window.__invoiceDataCache[name] = d; }));
+          }
+        }
+        if (rePending.length > 0) await Promise.all(rePending);
+      }
+
+      // 报销单 HTML -> A4 PDF。确认弹窗里的紧凑预览样式不影响正式版式。
+      async function renderExpenseReportPdf(invoiceData, totalAmountOverride) {
+        const reportHTML = generateExpenseReportHTML(invoiceData, totalAmountOverride);
+        const container = document.createElement('div');
+        container.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:-1;';
+        container.innerHTML = reportHTML;
+        document.body.appendChild(container);
         try {
-          showProcessingNotification('正在生成报销单');
-
-          if (typeof html2canvas === 'undefined') throw new Error('html2canvas 库未加载，请检查网络连接');
-          if (!window.jspdf) throw new Error('jsPDF 库未加载，请检查网络连接');
-          if (!window.PDFLib) throw new Error('PDF-lib 库未加载，请检查网络连接');
-
-          if (window.__fileDebugCache && window.__fileDebugCache.size > 0) {
-            const rePending = [];
-            for (const [name, file] of window.__fileDebugCache.entries()) {
-              if (name.toLowerCase().endsWith('.pdf') &&
-                !name.includes('_副本') && !/^报销单[_-]|^报销单\.pdf$/i.test(name) && !name.startsWith('000_')) {
-                rePending.push(extractInvoiceDataFromPdf(name, file).then(d => { window.__invoiceDataCache[name] = d; }));
-              }
-            }
-            if (rePending.length > 0) await Promise.all(rePending);
-          }
-
-          const data = await getInvoiceDataFromApp();
-          const invoiceData = Array.isArray(data) ? data : (data.invoices || []);
-
-          if (!invoiceData || invoiceData.length === 0) {
-            const oldNotif = document.getElementById('processing-notification');
-            if (oldNotif) oldNotif.remove();
-            alert('❌ 请先上传发票文件\n\n提示：上传后稍等片刻，系统会自动识别发票信息。');
-            return;
-          }
-
-          const totalAmountFromStats = (data && data.totalAmount != null) ? data.totalAmount : null;
-          console.log('📋 发票数量:', invoiceData.length, '总金额(与统计一致):', totalAmountFromStats, '发票数据:', invoiceData.map(i => ({
-            project: i.projectName || i.itemName, amount: i.amount
-          })));
-
-          const reportHTML = generateExpenseReportHTML(invoiceData, totalAmountFromStats);
-
-          const container = document.createElement('div');
-          container.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:-1;';
-          container.innerHTML = reportHTML;
-          document.body.appendChild(container);
-
           const reportPages = container.querySelectorAll('.expenseReportPage');
           const { jsPDF } = window.jspdf;
           const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
@@ -593,167 +621,391 @@
             }
             pdf.addImage(imgData, 'PNG', dx, dy, drawW, drawH);
           }
-          document.body.removeChild(container);
-
           const reportPdfBytes = pdf.output('arraybuffer');
           console.log('✅ 报销单PDF生成完成，字节数:', reportPdfBytes.byteLength, '页数:', reportPages.length);
+          return reportPdfBytes;
+        } finally {
+          if (container.parentNode) container.parentNode.removeChild(container);
+        }
+      }
 
-          await mergeReportWithInvoicesForPreview(reportPdfBytes, invoiceData);
+      async function generateExpenseReport() {
+        try {
+          assertReportLibs();
+          await refreshInvoiceRecognition();
 
-          showSuccessNotification('✅ 报销单已生成并合并！请在右侧预览窗口查看，可直接下载打印。');
+          const data = await getInvoiceDataFromApp();
+          const invoiceData = Array.isArray(data) ? data : (data.invoices || []);
+          if (!invoiceData || invoiceData.length === 0) {
+            alert('❌ 请先上传发票文件\n\n提示：上传后稍等片刻，系统会自动识别发票信息。');
+            return false;
+          }
+          const totalAmountFromStats = (data && data.totalAmount != null) ? data.totalAmount : null;
+          applyExpenseReportOverrides(invoiceData);
+          console.log('📋 发票数量:', invoiceData.length, '总金额(与统计一致):', totalAmountFromStats);
+
+          // 强制人工确认：不确认不生成；超范围票据必须先修正归行日期
+          const confirmedData = await showExpenseReportConfirmDialog(invoiceData, totalAmountFromStats);
+          if (!confirmedData) return false;
+
+          showProcessingNotification('正在生成报销单');
+          const reportPdfBytes = await renderExpenseReportPdf(confirmedData, totalAmountFromStats);
+          await mergeReportWithInvoicesForPreview(reportPdfBytes, confirmedData);
+          showSuccessNotification('✅ 报销单已确认并生成！请在右侧预览窗口查看，可直接下载打印。');
+          return true;
         } catch (error) {
           console.error('❌ 生成报销单失败:', error);
           const oldNotif = document.getElementById('processing-notification');
           if (oldNotif) oldNotif.remove();
           alert('❌ 生成报销单失败: ' + error.message);
+          return false;
         }
       }
 
       window.generateExpenseReport = generateExpenseReport;
 
-      async function generateExpenseReportManual() {
-        try {
-          if (typeof html2canvas === 'undefined') throw new Error('html2canvas 库未加载');
-          if (!window.jspdf) throw new Error('jsPDF 库未加载');
-          if (!window.PDFLib) throw new Error('PDF-lib 库未加载');
-
-          if (window.__fileDebugCache && window.__fileDebugCache.size > 0) {
-            const rePending = [];
-            for (const [name, file] of window.__fileDebugCache.entries()) {
-              if (name.toLowerCase().endsWith('.pdf') &&
-                !name.includes('_副本') && !/^报销单[_-]|^报销单\.pdf$/i.test(name) && !name.startsWith('000_')) {
-                rePending.push(extractInvoiceDataFromPdf(name, file).then(d => { window.__invoiceDataCache[name] = d; }));
-              }
-            }
-            if (rePending.length > 0) await Promise.all(rePending);
-          }
-
-          const data = await getInvoiceDataFromApp();
-          const invoiceData = Array.isArray(data) ? data : (data.invoices || []);
-
-          if (!invoiceData || invoiceData.length === 0) {
-            alert('❌ 请先上传发票文件');
-            return;
-          }
-
-          const confirmed = await showInvoiceEditDialog(invoiceData);
-          if (!confirmed) return;
-
-          showProcessingNotification('正在生成报销单');
-
-          const reportHTML = generateExpenseReportHTML(invoiceData, null);
-
-          const container = document.createElement('div');
-          container.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:-1;';
-          container.innerHTML = reportHTML;
-          document.body.appendChild(container);
-
-          const reportPages = container.querySelectorAll('.expenseReportPage');
-          const { jsPDF } = window.jspdf;
-          const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
-          const pW = pdf.internal.pageSize.getWidth();
-          const pH = pdf.internal.pageSize.getHeight();
-
-          for (let pi = 0; pi < reportPages.length; pi++) {
-            if (pi > 0) pdf.addPage();
-            const canvas = await html2canvas(reportPages[pi], {
-              scale: 4, useCORS: true, logging: false, backgroundColor: '#ffffff',
-              windowWidth: 794, width: 794, height: 1123,
-            });
-            const imgData = canvas.toDataURL('image/png');
-            const imgAspect = canvas.width / canvas.height;
-            const pdfAspect = pW / pH;
-            let drawW, drawH, dx = 0, dy = 0;
-            if (imgAspect > pdfAspect) {
-              drawW = pW; drawH = pW / imgAspect; dy = (pH - drawH) / 2;
-            } else {
-              drawH = pH; drawW = pH * imgAspect; dx = (pW - drawW) / 2;
-            }
-            pdf.addImage(imgData, 'PNG', dx, dy, drawW, drawH);
-          }
-          document.body.removeChild(container);
-
-          const reportPdfBytes = pdf.output('arraybuffer');
-          await mergeReportWithInvoicesForPreview(reportPdfBytes, invoiceData);
-          showSuccessNotification('✅ 报销单已生成并合并！');
-        } catch (error) {
-          console.error('❌ 生成报销单失败:', error);
-          const oldNotif = document.getElementById('processing-notification');
-          if (oldNotif) oldNotif.remove();
-          alert('❌ 生成报销单失败: ' + error.message);
-        }
-      }
-
-      function showInvoiceEditDialog(invoiceData) {
+      // ------------------------------------------------------------------
+      // 生成前强制确认窗口：左侧报销单实时预览（含超范围提示行），
+      // 右侧票据数据表（项目名 / 金额 / 归行日期可改）。
+      // 返回 Promise<draft[] | false>；false = 用户取消，不生成任何 PDF。
+      // totalAmountFromStats 仅保留给调用方传参兼容，合计以表格模型为准。
+      // ------------------------------------------------------------------
+      function showExpenseReportConfirmDialog(invoiceData, totalAmountFromStats) {
         return new Promise((resolve) => {
+          const api = window.__expenseReportTable;
+          if (!api) { alert('❌ 差旅报销单模块未加载'); resolve(false); return; }
+
+          // 副本操作：取消即丢弃，不污染 React / 识别缓存里的原始数据
+          const draft = invoiceData.map(inv => Object.assign({}, inv, {
+            trip: inv.trip ? Object.assign({}, inv.trip) : null
+          }));
+          const cfg = Object.assign({}, readTripConfigFromUI());
+          let settled = false;
+          let currentIssues = [];
+
+          const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+          })[c]);
+          const cnDay = (dt) => dt ? (dt.getFullYear() + '/' + (dt.getMonth() + 1) + '/' + dt.getDate()) : '';
+          const first = api.analyzeExpenseReport(draft, cfg);
+
+          function dateForRow(inv, i, analysis) {
+            if (inv.isTrip) {
+              const p = inv.trip && inv.trip.primaryDate;
+              return p ? String(p).slice(0, 10) : formatDateForInput(inv.issueDate || inv.date);
+            }
+            const d = (analysis.model.stats.details || []).find(x => x.index === i);
+            return (d && d.dates && d.dates[0]) || inv.__reportDate ||
+              formatDateForInput(inv.issueDate || inv.date);
+          }
+
+          function rowHTML(inv, i, analysis) {
+            const isTrip = !!inv.isTrip;
+            const cell = 'padding:6px 8px;border-bottom:1px solid #eef0f4;';
+            // 当前发票归入的费用列：手动选择 > 关键词自动归类
+            const curCat = api.utils.categorize(inv, cfg);
+            const manualCat = !!inv.__reportCategory;
+            const catList = api.SELECTABLE_CATS || ['ticket', 'taxi', 'transportOther', 'lodging', 'refund'];
+            const catOptions = catList.map(k =>
+              `<option value="${k}" ${curCat === k ? 'selected' : ''}>${esc(api.COL_LABEL[k] || k)}</option>`).join('');
+            return `<tr data-idx="${i}" style="background:${isTrip ? '#fffbeb' : '#fff'};">
+              <td style="${cell}text-align:center;color:#6b7280;font-size:12px;">${i + 1}</td>
+              <td style="${cell}text-align:center;font-size:11px;line-height:1.5;">${isTrip
+                ? '🚕 行程单<br><span style="color:#b45309;">仅核对日期/金额</span>' : '发票'}</td>
+              <td style="padding:4px 6px;border-bottom:1px solid #eef0f4;">
+                <input class="erc-name" data-idx="${i}" type="text" value="${esc(inv.projectName || inv.itemName || '电子发票')}" ${isTrip ? 'disabled' : ''}
+                  style="width:100%;box-sizing:border-box;padding:5px 7px;border:1px solid #dfe3ea;border-radius:6px;font-size:12px;"></td>
+              <td style="padding:4px 6px;border-bottom:1px solid #eef0f4;">
+                <input class="erc-amount" data-idx="${i}" type="number" step="0.01" value="${(parseFloat(inv.amount) || 0).toFixed(2)}" ${isTrip ? 'disabled' : ''}
+                  style="width:100%;box-sizing:border-box;padding:5px 7px;border:1px solid #dfe3ea;border-radius:6px;font-size:12px;text-align:right;"></td>
+              <td style="padding:4px 6px;border-bottom:1px solid #eef0f4;">
+                ${isTrip
+                  ? `<div style="text-align:center;color:#9ca3af;font-size:11px;">—</div>`
+                  : `<select class="erc-cat" data-idx="${i}" title="选择该发票填入的费用列"
+                      style="width:100%;box-sizing:border-box;padding:5px 2px;border:1px solid ${manualCat ? '#7c3aed' : '#dfe3ea'};border-radius:6px;font-size:11px;background:${manualCat ? '#faf5ff' : '#fff'};cursor:pointer;">
+                      ${catOptions}
+                    </select>`}
+              </td>
+              <td style="padding:4px 6px;border-bottom:1px solid #eef0f4;">
+                <input class="erc-date" data-idx="${i}" type="date" value="${dateForRow(inv, i, analysis)}"
+                  style="width:100%;box-sizing:border-box;padding:5px 6px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;"></td>
+              <td class="erc-status" style="${cell}text-align:center;font-size:11px;"></td>
+            </tr>`;
+          }
+
+          const tableHTML = `<table style="width:100%;min-width:720px;border-collapse:collapse;font-size:12px;">
+            <thead><tr style="background:#f7f8fc;">
+              <th style="padding:8px 6px;border-bottom:1px solid #e5e7eb;width:34px;">序号</th>
+              <th style="padding:8px 6px;border-bottom:1px solid #e5e7eb;width:80px;">类型</th>
+              <th style="padding:8px 6px;border-bottom:1px solid #e5e7eb;">项目名称</th>
+              <th style="padding:8px 6px;border-bottom:1px solid #e5e7eb;width:88px;">金额(元)</th>
+              <th style="padding:8px 6px;border-bottom:1px solid #e5e7eb;width:104px;color:#7c3aed;">填入位置</th>
+              <th style="padding:8px 6px;border-bottom:1px solid #e5e7eb;width:128px;">归行日期</th>
+              <th style="padding:8px 6px;border-bottom:1px solid #e5e7eb;width:116px;">状态 / 快速归位</th>
+            </tr></thead>
+            <tbody>${draft.map((inv, i) => rowHTML(inv, i, first)).join('')}</tbody>
+          </table>`;
+
           const overlay = document.createElement('div');
-          overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100000;display:flex;align-items:center;justify-content:center;';
-
-          let rows = invoiceData.map((inv, i) => `
-            <tr${inv.isTrip ? ' style="background:#fffbeb;"' : ''}>
-              <td style="padding:8px;border:1px solid #e5e7eb;text-align:center;">${i + 1}</td>
-              <td style="padding:8px;border:1px solid #e5e7eb;text-align:center;font-size:11px;">${inv.isTrip ? '🚕 行程单<br><span style="color:#92400e;">仅核对日期/金额</span>' : '发票'}</td>
-              <td style="padding:4px;border:1px solid #e5e7eb;">
-                <input type="text" data-field="projectName" data-idx="${i}" value="${(inv.projectName || inv.itemName || '电子发票').replace(/"/g, '&quot;')}" ${inv.isTrip ? 'disabled' : ''} style="width:100%;padding:6px;border:1px solid #d1d5db;border-radius:4px;font-size:13px;">
-              </td>
-              <td style="padding:4px;border:1px solid #e5e7eb;">
-                <input type="number" step="0.01" data-field="amount" data-idx="${i}" value="${parseFloat(inv.amount) || 0}" ${inv.isTrip ? 'disabled' : ''} style="width:100%;padding:6px;border:1px solid #d1d5db;border-radius:4px;font-size:13px;text-align:right;">
-              </td>
-              <td style="padding:4px;border:1px solid #e5e7eb;">
-                <input type="date" data-field="date" data-idx="${i}" value="${formatDateForInput(inv.isTrip && inv.trip && inv.trip.primaryDate ? inv.trip.primaryDate : (inv.issueDate || inv.date))}" ${inv.isTrip ? 'disabled' : ''} style="padding:6px;border:1px solid #d1d5db;border-radius:4px;font-size:13px;">
-              </td>
-            </tr>
-          `).join('');
-
+          overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.55);z-index:100000;display:flex;align-items:center;justify-content:center;padding:16px;';
           overlay.innerHTML = `
-            <div style="background:white;border-radius:12px;padding:24px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
-              <h3 style="margin:0 0 16px;font-size:18px;">✏️ 确认发票数据</h3>
-              <table style="width:100%;border-collapse:collapse;font-size:13px;">
-                <thead>
-                  <tr style="background:#f9fafb;">
-                    <th style="padding:8px;border:1px solid #e5e7eb;width:40px;">序号</th>
-                    <th style="padding:8px;border:1px solid #e5e7eb;width:96px;">类型</th>
-                    <th style="padding:8px;border:1px solid #e5e7eb;">项目名称</th>
-                    <th style="padding:8px;border:1px solid #e5e7eb;width:120px;">金额(元)</th>
-                    <th style="padding:8px;border:1px solid #e5e7eb;width:140px;">日期</th>
-                  </tr>
-                </thead>
-                <tbody>${rows}</tbody>
-              </table>
-              <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
-                <button id="__er_edit_cancel" style="padding:8px 20px;border:1px solid #d1d5db;border-radius:6px;background:white;cursor:pointer;font-size:14px;">取消</button>
-                <button id="__er_edit_confirm" style="padding:8px 20px;border:none;border-radius:8px;background:#4338ca;color:white;cursor:pointer;font-size:14px;font-weight:600;box-shadow:0 4px 12px rgba(67,56,202,0.22);">确认生成</button>
+            <div id="erc_dialog" style="background:#fff;border-radius:16px;width:min(1120px,96vw);max-height:92vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 70px rgba(15,23,42,0.35);font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;color:#111827;">
+              <div style="display:flex;align-items:center;gap:10px;padding:15px 20px;border-bottom:1px solid #eef0f4;">
+                <span style="font-size:20px;">✏️</span>
+                <div style="flex:1;">
+                  <div style="font-size:17px;font-weight:700;">确认报销单内容</div>
+                  <div style="font-size:12px;color:#6b7280;margin-top:2px;">左侧预览即最终报销单内容；右侧可修改票据的「填入位置（费用列）」与「归行日期」。超范围票据处理完才能生成。</div>
+                </div>
+                <button id="erc_close_x" title="关闭" style="width:28px;height:28px;border:none;border-radius:50%;background:#f3f4f6;color:#db2777;font-size:14px;cursor:pointer;">●</button>
               </div>
-            </div>
-          `;
-
+              <div id="erc_banner"></div>
+              <div style="display:flex;align-items:center;gap:9px;flex-wrap:wrap;padding:9px 20px;background:#fafbff;border-bottom:1px solid #eef0f4;font-size:12px;">
+                <span style="font-weight:600;color:#374151;">🧳 出差范围</span>
+                <input id="erc_start" type="date" style="padding:5px 7px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;">
+                <span style="color:#9ca3af;">~</span>
+                <input id="erc_end" type="date" style="padding:5px 7px;border:1px solid #d1d5db;border-radius:6px;font-size:12px;">
+                <span id="erc_meta" style="color:#6b7280;"></span>
+                <span style="color:#9ca3af;">日期留空按票据日期推断；改动实时刷新预览</span>
+              </div>
+              <div style="flex:1;display:flex;gap:14px;padding:12px 16px;min-height:0;">
+                <div style="flex:0 0 47%;display:flex;flex-direction:column;min-width:0;">
+                  <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:6px;font-size:12px;font-weight:600;color:#374151;">
+                    <span>📄 报销单预览（实时）<span style="font-weight:400;color:#9ca3af;">· 可用 + 放大</span></span>
+                    <div style="display:flex;align-items:center;gap:4px;">
+                      <button id="erc_scale_out" title="缩小" style="width:24px;height:22px;border:1px solid #d1d5db;border-radius:5px;background:#fff;color:#4338ca;font-size:13px;cursor:pointer;">−</button>
+                      <span id="erc_scale_val" title="点击恢复适应宽度" style="min-width:34px;text-align:center;font-size:11px;color:#6b7280;cursor:pointer;">适应</span>
+                      <button id="erc_scale_in" title="放大" style="width:24px;height:22px;border:1px solid #d1d5db;border-radius:5px;background:#fff;color:#4338ca;font-size:13px;cursor:pointer;">+</button>
+                      <button id="erc_zoom" style="margin-left:4px;padding:4px 9px;border:1px solid #d1d5db;border-radius:6px;background:#fff;color:#4338ca;font-size:11px;cursor:pointer;">🔍 原尺寸</button>
+                    </div>
+                  </div>
+                  <div id="erc_viewport" style="flex:1;min-height:200px;overflow:auto;background:#f8fafc;border:1px solid #e5e7eb;border-radius:10px;padding:10px;">
+                    <div id="erc_preview"></div>
+                  </div>
+                </div>
+                <div style="flex:1;display:flex;flex-direction:column;min-width:0;">
+                  <div style="margin-bottom:6px;font-size:12px;font-weight:600;color:#374151;">🧾 票据数据（项目名称 / 金额 / <span style="color:#7c3aed;">填入位置</span> / 归行日期 可修改）</div>
+                  <div id="erc_table_wrap" style="flex:1;min-height:200px;overflow:auto;border:1px solid #e5e7eb;border-radius:10px;background:#fff;">${tableHTML}</div>
+                </div>
+              </div>
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 20px;border-top:1px solid #eef0f4;">
+                <div style="font-size:12px;color:#4b5563;">
+                  <div id="erc_stats" style="font-weight:600;color:#111827;"></div>
+                  <label style="display:flex;align-items:center;gap:6px;margin-top:6px;cursor:pointer;">
+                    <input id="erc_keep" type="checkbox"> 我已核对，允许保留超范围票据（金额计入合计、不计补贴）
+                  </label>
+                </div>
+                <div style="display:flex;gap:10px;">
+                  <button id="erc_cancel" style="padding:9px 20px;border:1px solid #d1d5db;border-radius:8px;background:#fff;color:#374151;cursor:pointer;font-size:13px;">取消</button>
+                  <button id="erc_confirm" style="padding:9px 22px;border:none;border-radius:8px;background:#4338ca;color:#fff;cursor:pointer;font-size:13px;font-weight:700;box-shadow:0 4px 14px rgba(67,56,202,0.25);">确认生成</button>
+                </div>
+              </div>
+            </div>`;
           document.body.appendChild(overlay);
 
-          overlay.querySelector('#__er_edit_cancel').addEventListener('click', () => {
-            document.body.removeChild(overlay);
-            resolve(false);
-          });
+          const $ = (id) => overlay.querySelector('#' + id);
+          const banner = $('erc_banner'), preview = $('erc_preview'), viewport = $('erc_viewport');
+          const tableWrap = $('erc_table_wrap'), tbody = tableWrap.querySelector('tbody');
+          const startInput = $('erc_start'), endInput = $('erc_end'), meta = $('erc_meta');
+          const stats = $('erc_stats'), keep = $('erc_keep'), confirmBtn = $('erc_confirm');
+          const cancelBtn = $('erc_cancel'), closeX = $('erc_close_x'), zoomBtn = $('erc_zoom');
+          const scaleIn = $('erc_scale_in'), scaleOut = $('erc_scale_out'), scaleVal = $('erc_scale_val');
+          let previewScale = null; // null = 自动适应预览区宽度
 
-          overlay.querySelector('#__er_edit_confirm').addEventListener('click', () => {
-            overlay.querySelectorAll('input[data-field="projectName"]').forEach(input => {
-              const idx = parseInt(input.dataset.idx);
-              invoiceData[idx].projectName = input.value;
-              invoiceData[idx].itemName = input.value;
-            });
-            overlay.querySelectorAll('input[data-field="amount"]').forEach(input => {
-              const idx = parseInt(input.dataset.idx);
-              invoiceData[idx].amount = parseFloat(input.value) || 0;
-            });
-            overlay.querySelectorAll('input[data-field="date"]').forEach(input => {
-              const idx = parseInt(input.dataset.idx);
-              if (input.value) {
-                invoiceData[idx].issueDate = new Date(input.value);
-                invoiceData[idx].date = new Date(input.value);
+          function autoScale() {
+            return Math.min(1, Math.max(0.35, (viewport.clientWidth - 24) / 794));
+          }
+
+          function fitPreview() {
+            const root = preview.querySelector('#expenseReport');
+            if (!root) return;
+            const scale = previewScale == null ? autoScale() : previewScale;
+            root.style.width = '794px';
+            root.style.transformOrigin = 'top left';
+            root.style.transform = 'scale(' + scale + ')';
+            preview.style.height = Math.ceil((root.scrollHeight || 420) * scale) + 'px';
+            scaleVal.textContent = Math.round(scale * 100) + '%';
+          }
+
+          function stepScale(delta) {
+            const cur = previewScale == null ? autoScale() : previewScale;
+            previewScale = Math.min(1.5, Math.max(0.4, Math.round((cur + delta) * 10) / 10));
+            fitPreview();
+          }
+
+          function applyDate(idx, value) {
+            const inv = draft[idx];
+            if (!inv) return;
+            if (inv.isTrip) {
+              if (!inv.trip) inv.trip = { isTrip: true, primaryDate: '', dates: [], amount: parseFloat(inv.amount) || 0 };
+              inv.trip.primaryDate = value;
+            } else if (value) {
+              inv.__reportDate = value;
+            } else {
+              delete inv.__reportDate;
+            }
+          }
+
+          function syncTripRangeToCard() {
+            const s = document.getElementById('__er_trip_start');
+            const e = document.getElementById('__er_trip_end');
+            if (s) s.value = cfg.startDate || '';
+            if (e) e.value = cfg.endDate || '';
+            if (typeof setTripExpenseConfig === 'function') {
+              setTripExpenseConfig({ startDate: cfg.startDate, endDate: cfg.endDate });
+            }
+          }
+
+          function refresh() {
+            const analysis = api.analyzeExpenseReport(draft, cfg);
+            currentIssues = analysis.issues;
+            preview.innerHTML = generateExpenseReportHTML(draft, null, cfg, { preview: true });
+            fitPreview();
+
+            const badSet = new Set(currentIssues.map(x => x.index));
+            draft.forEach((inv, i) => {
+              const tr = tbody.querySelector('tr[data-idx="' + i + '"]');
+              if (!tr) return;
+              const bad = badSet.has(i);
+              tr.style.background = bad ? '#fff7ed' : (inv.isTrip ? '#fffbeb' : (i % 2 ? '#fafafa' : '#ffffff'));
+              const dateInput = tr.querySelector('.erc-date');
+              if (dateInput) {
+                dateInput.style.border = bad ? '1px solid #f97316' : '1px solid #d1d5db';
+                dateInput.style.boxShadow = bad ? '0 0 0 2px rgba(249,115,22,0.18)' : 'none';
+                if (document.activeElement !== dateInput) dateInput.value = dateForRow(inv, i, analysis);
+              }
+              const st = tr.querySelector('.erc-status');
+              if (st) {
+                if (bad) {
+                  st.innerHTML = `<div style="color:#c2410c;font-weight:700;margin-bottom:3px;">⚠ 超范围</div>
+                     <select class="erc-quick" data-idx="${i}" style="width:100%;padding:3px;border:1px solid #fdba74;border-radius:5px;background:#fff;font-size:11px;">
+                       <option value="">放入出差日期…</option>
+                       ${analysis.dayKeys.map(k => `<option value="${k}">${k}</option>`).join('')}
+                     </select>`;
+                } else {
+                  const cur = api.utils.categorize(inv, cfg);
+                  const label = api.COL_LABEL[cur] || cur;
+                  const manualMark = inv.__reportCategory ? ' <span style="color:#7c3aed;" title="人工指定费用列">✎</span>' : '';
+                  st.innerHTML = `<span style="color:#15803d;">✓ 已入表</span>` +
+                    (inv.isTrip
+                      ? '<div style="color:#9ca3af;">不重复计金额</div>'
+                      : `<div style="color:#6b7280;">计入：${esc(label)}${manualMark}</div>`);
+                }
+              }
+              // 同步「填入位置」下拉：值与手动高亮随模型刷新，但交互中不抢焦点
+              const catSel = tr.querySelector('.erc-cat');
+              if (catSel && !inv.isTrip) {
+                const cur = api.utils.categorize(inv, cfg);
+                if (document.activeElement !== catSel) catSel.value = cur;
+                const manual = !!inv.__reportCategory;
+                catSel.style.border = manual ? '1px solid #7c3aed' : '1px solid #dfe3ea';
+                catSel.style.background = manual ? '#faf5ff' : '#fff';
               }
             });
-            document.body.removeChild(overlay);
-            resolve(true);
+
+            const rangeTxt = cnDay(analysis.start) + ' ~ ' + cnDay(analysis.end);
+            if (currentIssues.length) {
+              const dates = Array.from(new Set(currentIssues.map(x => x.dates[0]).filter(Boolean))).join('、');
+              banner.style.cssText = 'display:flex;align-items:center;gap:12px;padding:10px 20px;background:#fef2f2;border-bottom:1px solid #fecaca;color:#991b1b;font-size:12px;line-height:1.6;';
+              banner.innerHTML = `<div style="flex:1;">⚠ 检测到 <b>${currentIssues.length}</b> 笔票据日期超出出差范围（${esc(rangeTxt)}）：<b>${esc(dates)}</b>。请在右侧「归行日期」选择正确的出差日期，或调整上方出差范围；全部修正后才能生成报销单。</div>
+                <button id="erc_locate" style="white-space:nowrap;padding:5px 11px;border:1px solid #fca5a5;border-radius:6px;background:#fff;color:#b91c1c;font-size:11px;cursor:pointer;">定位第 1 笔</button>`;
+            } else {
+              banner.style.cssText = 'padding:10px 20px;background:#f0fdf4;border-bottom:1px solid #bbf7d0;color:#166534;font-size:12px;line-height:1.6;';
+              banner.innerHTML = `✓ 已核对：所有票据日期均落在出差范围（${esc(rangeTxt)}）内，左侧预览无「超范围」行。确认内容无误后点击「确认生成」。`;
+            }
+
+            const invoiceCount = draft.filter(x => !x.isTrip).length;
+            const tripCount = draft.length - invoiceCount;
+            meta.textContent = `出差人：${cfg.traveler || '未填'} · ${cfg.location || '地点未填'} · ${cfg.reason || '原因未填'} · 补贴 ${cfg.dailyAllowance} 元/天`;
+            stats.textContent = `共 ${draft.length} 项（${invoiceCount} 张发票 / ${tripCount} 张行程单） · 预览合计 ¥${(analysis.model.grandTotal / 100).toFixed(2)} · 待处理 ${currentIssues.length} 笔超范围`;
+
+            const blocked = currentIssues.length > 0 && !keep.checked;
+            confirmBtn.disabled = blocked;
+            confirmBtn.style.opacity = blocked ? '0.55' : '1';
+            confirmBtn.style.cursor = blocked ? 'not-allowed' : 'pointer';
+            confirmBtn.textContent = blocked
+              ? `请先修正 ${currentIssues.length} 笔超范围票据`
+              : (currentIssues.length ? `仍要生成（含 ${currentIssues.length} 笔超范围）` : '确认生成');
+            // 首帧布局稳定后再贴合一次，避免初次缩放比例偏差
+            requestAnimationFrame(fitPreview);
+          }
+
+          function onFieldChange(e) {
+            const t = e.target;
+            if (!t || t.dataset.idx === undefined) return;
+            const idx = parseInt(t.dataset.idx, 10);
+            if (isNaN(idx) || !draft[idx]) return;
+            if (t.classList.contains('erc-name')) {
+              draft[idx].projectName = t.value; draft[idx].itemName = t.value;
+            } else if (t.classList.contains('erc-amount')) {
+              const v = parseFloat(t.value); draft[idx].amount = isNaN(v) ? 0 : v;
+            } else if (t.classList.contains('erc-cat')) {
+              // 手动选择发票填入的费用列（普票费/打的费/其他/住宿/退票费）
+              if (t.value) draft[idx].__reportCategory = t.value;
+              else delete draft[idx].__reportCategory;
+            } else if (t.classList.contains('erc-date')) {
+              applyDate(idx, t.value);
+            } else if (t.classList.contains('erc-quick') && t.value) {
+              applyDate(idx, t.value);
+              const di = tbody.querySelector('.erc-date[data-idx="' + idx + '"]');
+              if (di) di.value = t.value;
+            }
+            refresh();
+          }
+
+          function finish(ok) {
+            if (settled) return;
+            settled = true;
+            document.removeEventListener('keydown', onKey);
+            window.removeEventListener('resize', fitPreview);
+            if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            if (ok) {
+              syncTripRangeToCard();
+              saveExpenseReportOverrides(draft);
+              resolve(draft);
+            } else {
+              resolve(false);
+            }
+          }
+
+          function onKey(e) { if (e.key === 'Escape') finish(false); }
+
+          tableWrap.addEventListener('input', onFieldChange);
+          tableWrap.addEventListener('change', onFieldChange);
+          banner.addEventListener('click', (e) => {
+            if (e.target && e.target.id === 'erc_locate' && currentIssues.length) {
+              const tr = tbody.querySelector('tr[data-idx="' + currentIssues[0].index + '"]');
+              if (tr) {
+                tr.scrollIntoView({ block: 'center' });
+                const di = tr.querySelector('.erc-date');
+                if (di) di.focus();
+              }
+            }
           });
+          startInput.addEventListener('change', () => { cfg.startDate = startInput.value; syncTripRangeToCard(); refresh(); });
+          endInput.addEventListener('change', () => { cfg.endDate = endInput.value; syncTripRangeToCard(); refresh(); });
+          keep.addEventListener('change', refresh);
+          cancelBtn.addEventListener('click', () => finish(false));
+          closeX.addEventListener('click', () => finish(false));
+          overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(false); });
+          document.addEventListener('keydown', onKey);
+          window.addEventListener('resize', fitPreview);
+          confirmBtn.addEventListener('click', () => { if (!confirmBtn.disabled) finish(true); });
+          scaleIn.addEventListener('click', () => stepScale(0.1));
+          scaleOut.addEventListener('click', () => stepScale(-0.1));
+          scaleVal.addEventListener('click', () => { previewScale = null; fitPreview(); });
+          zoomBtn.addEventListener('click', () => {
+            const html = '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>报销单原尺寸预览</title></head>' +
+              '<body style="margin:0;background:#eef1f6;padding:16px;">' +
+              generateExpenseReportHTML(draft, null, cfg) + '</body></html>';
+            const url = URL.createObjectURL(new Blob([html], { type: 'text/html;charset=utf-8' }));
+            const w = window.open(url, '_blank');
+            if (!w) alert('浏览器拦截了新窗口，请允许弹出窗口后重试');
+            setTimeout(() => URL.revokeObjectURL(url), 60000);
+          });
+
+          startInput.value = cfg.startDate || '';
+          endInput.value = cfg.endDate || '';
+          refresh();
         });
       }
 
@@ -761,11 +1013,15 @@
         try {
           const date = d instanceof Date ? d : new Date(d);
           if (isNaN(date.getTime())) return '';
-          return date.toISOString().split('T')[0];
+          // 必须用本地年月日：toISOString() 会把东八区的 00:00 换算成前一天
+          return date.getFullYear() + '-' +
+            String(date.getMonth() + 1).padStart(2, '0') + '-' +
+            String(date.getDate()).padStart(2, '0');
         } catch (e) { return ''; }
       }
 
-      window.generateExpenseReportManual = generateExpenseReportManual;
+      // 旧「手动确认生成」按钮保留为别名，行为与自动生成完全一致：都要先确认
+      window.generateExpenseReportManual = generateExpenseReport;
 
       function downloadPdf(pdfData, filename) {
         const blob = pdfData instanceof Blob ? pdfData : new Blob([pdfData], { type: 'application/pdf' });
@@ -1240,7 +1496,7 @@
           <div data-slot="card-header" style="padding:0;margin-bottom:12px;">
             <div data-slot="card-title" style="font-weight:700;font-size:1rem;">📋 生成报销单</div>
             <p style="font-size:12px;color:#6b7280;margin-top:5px;line-height:1.5;">
-              差旅报销单：行程单核对日期与金额，按天计补贴 | 手动确认可编辑项目名和金额
+              生成前强制确认：左侧实时预览报销单、右侧核对票据；超范围票据须重新选择归行日期后才能生成。
             </p>
           </div>
           <div class="er-trip-config" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:12px;padding:10px 12px;background:#fafbff;border:1px solid #e8ecf7;border-radius:8px;">
@@ -1276,7 +1532,7 @@
               background:#f0fdf4;
               color:#15803d;border:1px solid #bbf7d0;border-radius:8px;font-size:14px;font-weight:600;
               cursor:pointer;box-shadow:0 1px 3px rgba(21,128,61,0.08);transition:filter 0.2s;">
-              📋 自动生成报销单
+              📋 生成报销单（需确认）
             </button>
             <button class="er-btn-manual" style="
               flex:1;min-width:130px;padding:10px 16px;
@@ -1921,7 +2177,7 @@
         buttonContainer.style.cssText = 'display: flex; gap: 12px;';
 
         const generateBtn = document.createElement('button');
-        generateBtn.textContent = '📋 自动生成报销单';
+        generateBtn.textContent = '📋 生成报销单（需确认）';
         generateBtn.style.cssText = `
           flex: 1;
           padding: 11px 16px;

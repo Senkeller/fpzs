@@ -86,7 +86,7 @@ check('生成 6 个日期行', m.dayRows.length === 6, String(m.dayRows.length))
 check('行程单不重复计入金额（票据合计 110.55 元）',
   m.totals.ticket + m.totals.taxi + m.totals.transportOther + m.totals.lodging + m.totals.refund === 11055,
   String((m.totals.ticket + m.totals.taxi + m.totals.transportOther + m.totals.lodging + m.totals.refund) / 100));
-check('长途汽车票 75 元归入普票费', m.totals.ticket === 7500, String(m.totals.ticket / 100));
+check('长途汽车票 75 元归入「车船费-其他」', m.totals.transportOther === 7500 && m.totals.ticket === 0, String(m.totals.transportOther / 100));
 check('三笔网约车 35.55 元归入打的费', m.totals.taxi === 3555, String(m.totals.taxi / 100));
 check('补贴 6 天 × 50 = 300 元', m.totals.allowance === 30000, String(m.totals.allowance / 100));
 check('总计 410.55 元', m.grandTotal === 41055, String(m.grandTotal / 100));
@@ -97,7 +97,7 @@ m.dayRows.forEach(r => { byDay[T.utils.dayKey(r.date)] = r.cells; });
 check('09-06 滴滴 9.90 元按行程单日期归行', byDay['2026-09-06'].taxi === 990, String(byDay['2026-09-06'].taxi / 100));
 check('09-09 T3 打车 15.41 元按行程单日期归行', byDay['2026-09-09'].taxi === 1541, String(byDay['2026-09-09'].taxi / 100));
 check('09-10 享道 10.24 元按行程单日期归行', byDay['2026-09-10'].taxi === 1024, String(byDay['2026-09-10'].taxi / 100));
-check('09-11 汽车票 75 元无行程单，按开票日期归行', byDay['2026-09-11'].ticket === 7500, String(byDay['2026-09-11'].ticket / 100));
+check('09-11 汽车票 75 元无行程单，按开票日期归行', byDay['2026-09-11'].transportOther === 7500, String(byDay['2026-09-11'].transportOther / 100));
 check('无票日期 09-07 / 09-08 仍有补贴、费用为 0',
   byDay['2026-09-07'].allowance === 5000 && byDay['2026-09-07'].taxi === 0 &&
   byDay['2026-09-08'].allowance === 5000 && byDay['2026-09-08'].ticket === 0);
@@ -114,6 +114,27 @@ check('超范围金额 84.90 元不丢', !!m2.outRow && m2.outRow.subtotal === 8
 check('票据金额不丢，总计 = 110.55 票据 + 100 补贴 = 210.55 元',
   m2.grandTotal === 21055, String(m2.grandTotal / 100));
 
+console.log('\n=== E. 区间留空（靠推断）：待定发票的开票日不得撑大出差区间 ===');
+// 复现 bug：汽车票无行程单、开票日 9-11。旧逻辑把「所有发票开票日」纳入区间推断，
+// 区间被撑成 9-06~9-11（6 天 / 300 补贴），且 75 元落入区间内永不报超范围，
+// 补贴就这样算到了开票日上。
+// 修复后：区间仅按行程单真实出差日推断 → 9-06~9-10（5 天 / 250 补贴），
+// 汽车票 75 元被识别为超范围，确认弹窗会强制用户手选正确日期。
+const INFER_CFG = { location: '南宁', reason: '客户拜访', traveler: TRAVELER, formNo: FORM_NO, dailyAllowance: 50 };
+const m3 = T.buildTripModel(REAL, INFER_CFG);
+const a3 = T.analyzeExpenseReport(REAL, INFER_CFG);
+console.log('  统计:', JSON.stringify({ days: m3.dayRows.length, outOfRange: m3.stats.outOfRangeCount,
+  allowance: m3.totals.allowance / 100, grandTotal: m3.grandTotal / 100 }));
+check('推断区间 = 5 天（来自行程单 9-06/09/10，不含待定发票开票日 9-11）',
+  m3.dayRows.length === 5, String(m3.dayRows.length));
+check('补贴 = 5 天 × 50 = 250 元（未被开票日撑大）', m3.totals.allowance === 25000, String(m3.totals.allowance / 100));
+check('汽车票 75 元无行程单 → 被识别为超范围（旧逻辑会落在区间内不报警）',
+  m3.stats.outOfRangeCount === 1 && !!m3.outRow, 'out=' + m3.stats.outOfRangeCount);
+check('analyzeExpenseReport 把该发票列为 1 笔 issue（触发确认弹窗拦截）',
+  a3.issues.length === 1 && a3.issues[0].amount === 75, 'issues=' + a3.issues.length);
+check('超范围 75 元单列、金额不丢', !!m3.outRow && m3.outRow.subtotal === 7500, m3.outRow ? String(m3.outRow.subtotal / 100) : 'no row');
+check('总计 = 35.55 票据 + 250 补贴 + 75 超范围 = 360.55 元', m3.grandTotal === 36055, String(m3.grandTotal / 100));
+
 console.log('\n=== D. 生成 HTML 预览 ===');
 const html = T.generateExpenseReportHTML(REAL, undefined, CFG, {
   numberToChinese: n => String(n)
@@ -124,9 +145,9 @@ check('HTML 合计行金额 410.55', /410\.55/.test(html));
 check('版式：A4 纵向整页 + 黑体标题 + 编号 + 出差人',
   html.includes('width:794px;height:1123px') && html.includes('出差记录及费用报销清单') &&
   html.includes('编号：' + FORM_NO) && html.includes('出差人：' + TRAVELER));
-check('版式：三行表头（车船费跨两行三列）+ 数据行小计留空',
-  /colspan="3" rowspan="2"/.test(html) && html.includes('（退票费）') &&
-  /<td [^>]*><\/td><\/tr>/.test(html));
+check('版式：两行表头（车船费跨三列 + 普票费/打的费/其他子列）+ 数据行小计留空',
+  /colspan="3"/.test(html) && html.includes('普票费') && html.includes('打的费') &&
+  html.includes('（退票费）') && /<td [^>]*><\/td><\/tr>/.test(html));
 check('版式：每个日期行都填出差地点与原因',
   (html.match(/>南宁</g) || []).length >= 6 && (html.match(/>客户拜访</g) || []).length >= 6);
 check('版式：已移除记账凭证附件 / 中文大写 / 签章栏',
@@ -137,6 +158,33 @@ const outFile = path.join(outDir, 'real-nanning-report.html');
 fs.writeFileSync(outFile, '<!doctype html><meta charset="utf-8"><title>2026-9 南宁 差旅费报销单</title>' +
   '<style>body{background:#f3f4f6;margin:0;padding:24px;font-family:"Microsoft YaHei",sans-serif}</style>' + html);
 console.log('  → ' + outFile);
+
+// ------------------------------------------------------------------
+// F. 费用列手动覆盖（确认弹窗「填入位置」下拉）：人工选了费用列后，
+//    覆盖关键词自动归类，且 categoryManual 标记为 true、金额计入所选列。
+//    这是修复「发票被错误归类到某费用列」的防线。
+// ------------------------------------------------------------------
+console.log('\n=== F. 费用列手动覆盖（确认弹窗「填入位置」下拉）===');
+const ovData = REAL.map(r => Object.assign({}, r, { trip: r.trip ? Object.assign({}, r.trip) : null }));
+// 把「长途汽车票 75 元」从自动的「车船费-其他」改手动指定为「普票费」
+const bus = ovData[0];
+const autoCat = T.utils.categorize(bus, CFG);
+bus.__reportCategory = 'ticket';
+const mF = T.buildTripModel(ovData, CFG);
+const dF = mF.stats.details.find(x => x.index === 0);
+check('长途汽车票自动归类 = 车船费-其他', autoCat === 'transportOther', autoCat);
+check('手动指定「普票费」后归类变为 ticket', dF.category === 'ticket', dF.category);
+check('categoryManual 标记为 true', dF.categoryManual === true);
+check('75 元从「车船费-其他」移至「普票费」', mF.totals.ticket === 7500 && mF.totals.transportOther === 0,
+  'ticket=' + (mF.totals.ticket / 100) + ' other=' + (mF.totals.transportOther / 100));
+check('总计不受影响（金额不丢、仍 410.55）', mF.grandTotal === 41055, String(mF.grandTotal / 100));
+// analyzeExpenseReport 也应反映手动列
+const aF = T.analyzeExpenseReport(ovData, CFG);
+check('analyzeExpenseReport 返回该票据 category=ticket', aF.issues.find(x => false) === undefined && aF.model.stats.details[0].category === 'ticket');
+// 删除手动覆盖后回到自动归类
+delete bus.__reportCategory;
+const mF2 = T.buildTripModel(ovData, CFG);
+check('删除手动覆盖后回到自动归类（车船费-其他）', mF2.stats.details[0].category === 'transportOther', mF2.stats.details[0].category);
 
 console.log('\n=== 结果：' + pass + ' 通过 / ' + fail + ' 失败 ===');
 process.exit(fail ? 1 : 0);
