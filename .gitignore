@@ -1,0 +1,22 @@
+# ---- 构建 / 运行产物 ----
+dist/
+node_modules/
+package-lock.json
+sea-config.json
+*.log
+
+# ---- 工作区临时数据（含浏览器缓存与真实票据文本提取结果） ----
+.workbuddy/build/
+.workbuddy/preview/
+.workbuddy/backup/
+.workbuddy/tmp/
+.workbuddy/memory/
+
+# ---- 真实票据与个人数据（隐私，切勿提交 / 打包分享） ----
+2026-9 南宁/
+*.pdf
+*.PDF
+
+# ---- 系统杂项 ----
+Thumbs.db
+.DS_Store

@@ -1,0 +1,2973 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="utf-8" />
+
+  <script>
+    /* [已移除] 使用技巧弹窗：预置已读标记，防止浏览器缓存的旧 chunk 再次弹出 */
+    try { localStorage.setItem('invoice-tips-seen', 'true'); } catch (e) {}
+  </script>
+
+  <script>
+    (function () {
+      document.addEventListener('click', function (e) {
+        if (e.defaultPrevented || e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+        var a = e.target && e.target.closest ? e.target.closest('a[href]') : null;
+        if (!a) return;
+        if (a.target && a.target !== '_self') return;
+        if (a.hasAttribute('download')) return;
+        var href = a.getAttribute('href') || '';
+        if (!href || href[0] === '#') return;               // 锚点不拦
+        var u;
+        try { u = new URL(href, location.href); } catch (err) { return; }
+        if (u.origin !== location.origin) return;           // 外链不拦
+        if (/\.html?$/.test(u.pathname) || u.pathname === '/' || u.pathname.slice(-1) === '/') {
+          e.preventDefault();
+          e.stopImmediatePropagation();
+          location.href = u.href;
+        }
+      }, true);
+    })();
+  </script>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=yes">
+  
+  <!-- 便携/离线版：pdf.js worker 一律走本地副本，不再探测 CDN -->
+  <link rel="preload" href="static/js/pdf.worker.min.mjs" as="script" crossorigin="anonymous" />
+  <script>
+    (function () {
+      var LOCAL = 'static/js/pdf.worker.min.mjs';
+      window.__PDF_WORKER_SRC = LOCAL;
+      function apply(src) {
+        window.__PDF_WORKER_SRC = src;
+        try {
+          if (window.pdfjsLib && window.pdfjsLib.GlobalWorkerOptions) {
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc = src;
+          }
+        } catch (e) {}
+      }
+      apply(LOCAL);
+      // pdfjs-lib.js 是 async 加载，就绪后可能被它自己的默认值覆盖，补设一次
+      document.addEventListener('DOMContentLoaded', function () { apply(LOCAL); });
+    })();
+  </script>
+  <meta http-equiv="Content-Security-Policy"
+    content="default-src 'self' https: http: data: blob: 'unsafe-inline' 'unsafe-eval'; script-src 'self' https: http: 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'self' https: http: 'unsafe-inline' blob: data:; img-src * data: blob:; font-src * data: blob:; connect-src * data: blob:; frame-src * data: blob:; object-src * data: blob:; worker-src * blob: data:; child-src * blob: data:; media-src * blob: data:;" />
+  
+  <script src="static/js/custom/file-copy-print.js" defer></script>
+
+  
+  <script src="static/js/custom/notifications.js" defer></script>
+
+  
+
+  
+  <!-- 便携/离线版：三个 PDF 相关库随项目自带，不再依赖 CDN -->
+  <script src="static/vendor/html2canvas.min.js"></script>
+  <script src="static/vendor/jspdf.umd.min.js"></script>
+  <script src="static/vendor/pdf-lib.min.js"></script>
+  <script></script>
+  <script src="static/js/custom/expense-report-core.js?v=2"></script>
+  <script src="static/js/custom/expense-report-table.js?v=1"></script>
+  <script>
+    (function () {
+
+      (function patchArrayBufferForCropBox() {
+        const _normCache = new WeakMap();
+        async function normalizePdf(buffer) {
+          try {
+            if (!window.PDFLib || buffer.byteLength < 5) return buffer;
+            const head = new Uint8Array(buffer.slice(0, 5));
+            if (String.fromCharCode.apply(null, head) !== '%PDF-') return buffer;
+            const doc = await window.PDFLib.PDFDocument.load(buffer, { updateMetadata: false });
+            let changed = false;
+            for (const page of doc.getPages()) {
+              const cb = page.getCropBox();
+              if (cb.width < 0 || cb.height < 0) {
+                page.setCropBox(Math.min(cb.x, cb.x + cb.width), Math.min(cb.y, cb.y + cb.height), Math.abs(cb.width), Math.abs(cb.height));
+                changed = true;
+              }
+              const mb = page.getMediaBox();
+              if (mb.width < 0 || mb.height < 0) {
+                page.setMediaBox(Math.min(mb.x, mb.x + mb.width), Math.min(mb.y, mb.y + mb.height), Math.abs(mb.width), Math.abs(mb.height));
+                changed = true;
+              }
+            }
+            if (!changed) return buffer;
+            const out = await doc.save();
+            return out.buffer.slice(out.byteOffset, out.byteOffset + out.byteLength);
+          } catch (e) {
+            return buffer;
+          }
+        }
+        const origAB = Blob.prototype.arrayBuffer;
+        Blob.prototype.arrayBuffer = async function () {
+          if (this.type !== 'application/pdf') return origAB.call(this);
+
+          let bytes = _normCache.get(this);
+          if (!bytes) {
+            const buf = await origAB.call(this);
+            const fixed = await normalizePdf(buf);
+            bytes = new Uint8Array(fixed);
+            _normCache.set(this, bytes);
+          }
+          return bytes.slice().buffer;
+        };
+      })();
+
+      const _origCreateObjectURL = URL.createObjectURL.bind(URL);
+      URL.createObjectURL = function (obj) {
+        const url = _origCreateObjectURL(obj);
+        if (obj && obj.type === 'application/pdf' && obj.size > 1000) {
+          window.__lastPdfBlobUrl = url;
+          window.__lastPdfBlob = obj;
+
+          if (!window.__isGeneratingReport) {
+            window.__invoiceMergedBlob = obj;
+          }
+        }
+        return url;
+      };
+
+      const { initPdfJs, extractInvoiceDataFromPdf } = window.__expenseReportCore || {};
+
+      window.__invoiceDataCache = window.__invoiceDataCache || {};
+
+      function initFileProxy() {
+        if (!window.__fileDebugCache) {
+          setTimeout(initFileProxy, 600);
+          return;
+        }
+
+        for (const [name, file] of window.__fileDebugCache.entries()) {
+          if (
+            name.toLowerCase().endsWith('.pdf') &&
+            !name.includes('_副本') &&
+            !/^报销单[_-]|^报销单\.pdf$/i.test(name) &&
+            !name.startsWith('000_')
+          ) {
+            if (!window.__invoiceDataCache[name]) {
+              extractInvoiceDataFromPdf(name, file).then((d) => {
+                window.__invoiceDataCache[name] = d;
+              });
+            }
+          }
+        }
+
+        const origSet = Map.prototype.set;
+        window.__fileDebugCache.set = function (key, value) {
+          const result = origSet.call(this, key, value);
+          if (
+            key &&
+            key.toLowerCase().endsWith('.pdf') &&
+            !key.includes('_副本') &&
+            !/^报销单[_-]|^报销单\.pdf$/i.test(key) &&
+            !key.startsWith('000_')
+          ) {
+            extractInvoiceDataFromPdf(key, value).then((d) => {
+              window.__invoiceDataCache[key] = d;
+              console.log('✅ 自动识别完成:', key, '¥' + d.amount);
+            });
+          }
+          return result;
+        };
+
+        console.log('✅ 发票自动识别代理已启动');
+      }
+      setTimeout(initFileProxy, 300);
+
+      function parseStatsFromDOM() {
+        let totalAmount = null;
+        let invoiceCount = null;
+
+        const walk = (el) => {
+          if (!el || (invoiceCount !== null && totalAmount !== null)) return;
+
+          const text = (el.textContent || '').trim();
+          const countMatch = text.match(/发票数量[：:]\s*(\d+)|(\d+)\s*张/);
+          if (countMatch && invoiceCount === null) {
+            invoiceCount = parseInt(countMatch[1] || countMatch[2], 10);
+          }
+
+          const amountMatch = text.match(/总金额[：:]\s*¥?\s*([\d,]+\.?\d*)|¥\s*([\d,]+\.?\d*)/);
+          if (amountMatch && totalAmount === null) {
+            totalAmount = parseFloat((amountMatch[1] || amountMatch[2] || '').replace(/,/g, ''));
+          }
+
+          if (el.children) {
+            for (let i = 0; i < el.children.length; i++) walk(el.children[i]);
+          }
+        };
+
+        const statsCard = document.querySelector('[class*="stats"]') || document.body;
+        walk(statsCard);
+
+        return {
+          totalAmount: totalAmount !== null && !isNaN(totalAmount) ? totalAmount : null,
+          invoiceCount,
+        };
+      }
+
+      async function getInvoiceDataFromApp() {
+        await new Promise((r) => setTimeout(r, 300));
+        let invoices = [];
+
+        try {
+          const root = document.querySelector('#__next') || document.body;
+          const fk = Object.keys(root).find(
+            (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+          );
+
+          if (fk) {
+            const findStats = (node, depth = 0) => {
+              if (depth > 20) return null;
+
+              if (node && node.memoizedState) {
+                let cur = node.memoizedState;
+                while (cur) {
+                  if (cur.memoizedState && cur.memoizedState.stats) return cur.memoizedState.stats;
+                  if (cur.memoizedState && cur.memoizedState.invoices) {
+                    return { invoices: cur.memoizedState.invoices };
+                  }
+                  cur = cur.next;
+                }
+              }
+
+              const rc = node.child ? findStats(node.child, depth + 1) : null;
+              if (rc) return rc;
+              return node.sibling ? findStats(node.sibling, depth + 1) : null;
+            };
+
+            const stats = findStats(root[fk]);
+            if (stats && stats.invoices && stats.invoices.length > 0) {
+              stats.invoices.forEach((inv, i) => {
+                console.log(
+                  '🔍 React inv[' + i + '] keys:',
+                  Object.keys(inv).join(', '),
+                  JSON.stringify(inv).substring(0, 500)
+                );
+              });
+
+              const cache = window.__invoiceDataCache || {};
+
+              if (window.__fileDebugCache) {
+                const pending = [];
+                for (const inv of stats.invoices) {
+                  if (inv.fileName && !cache[inv.fileName]) {
+                    const file = window.__fileDebugCache.get(inv.fileName);
+                    if (file) {
+                      pending.push(
+                        extractInvoiceDataFromPdf(inv.fileName, file).then((d) => {
+                          window.__invoiceDataCache[inv.fileName] = d;
+                        })
+                      );
+                    }
+                  }
+                }
+                if (pending.length > 0) await Promise.all(pending);
+              }
+
+              const freshCache = window.__invoiceDataCache || {};
+              const statsTotal = stats.totalAmount ?? stats.total ?? stats.amount ?? null;
+              invoices = stats.invoices.map((inv) => {
+                const cached = freshCache[inv.fileName] || {};
+
+                const reactAmount = typeof inv.total === 'number' ? inv.total / 100 : null;
+                const amount = reactAmount ?? cached.amount ?? 0;
+                console.log('🔎 React发票金额来源', {
+                  fileName: inv.fileName,
+                  reactTotal: inv.total,
+                  reactAmount,
+                  cachedAmount: cached.amount,
+                  finalAmount: amount,
+                });
+                return {
+                  amount,
+                  issueDate: cached.date || inv.date || new Date(),
+                  date: cached.date || inv.date || new Date(),
+                  projectName: inv.itemName || inv.name || cached.itemName || '电子发票',
+                  itemName: inv.itemName || inv.name || cached.itemName || '电子发票',
+                  fileName: inv.fileName || '',
+                  isTrip: !!cached.isTrip,
+                  trip: cached.trip || null,
+                };
+              });
+
+              let tot = null;
+              if (typeof statsTotal === 'number') tot = statsTotal / 100;
+
+              return { invoices, totalAmount: tot, totalCount: invoices.length };
+            }
+          }
+        } catch (e) {
+          console.log('React获取失败:', e.message);
+        }
+
+        if (window.__invoiceDataCache) {
+          const cached = Object.values(window.__invoiceDataCache).filter(
+            (inv) => inv && !/^报销单[_-]|^报销单\.pdf$/i.test(inv.fileName) && !inv.fileName.startsWith('000_')
+          );
+
+          if (cached.length > 0) {
+            const domStats = parseStatsFromDOM();
+            const totalAmount = domStats.totalAmount !== null ? domStats.totalAmount : null;
+            return {
+              invoices: cached.map((inv) => ({
+                amount: inv.amount,
+                issueDate: inv.date,
+                date: inv.date,
+                projectName: inv.itemName,
+                itemName: inv.itemName,
+                fileName: inv.fileName,
+                isTrip: !!inv.isTrip,
+                trip: inv.trip || null,
+              })),
+              totalAmount,
+              totalCount: cached.length,
+            };
+          }
+        }
+
+        if (window.__fileDebugCache && window.__fileDebugCache.size > 0) {
+          const pending = [];
+          for (const [name, file] of window.__fileDebugCache.entries()) {
+            if (
+              name.toLowerCase().endsWith('.pdf') &&
+              !name.includes('_副本') &&
+              !/^报销单[_-]|^报销单\.pdf$/i.test(name) &&
+              !name.startsWith('000_')
+            ) {
+              if (!window.__invoiceDataCache[name]) {
+                pending.push(
+                  extractInvoiceDataFromPdf(name, file).then((d) => {
+                    window.__invoiceDataCache[name] = d;
+                  })
+                );
+              }
+            }
+          }
+
+          if (pending.length > 0) await Promise.all(pending);
+
+          const fresh = Object.values(window.__invoiceDataCache).filter(
+            (inv) => inv && !/^报销单[_-]|^报销单\.pdf$/i.test(inv.fileName) && !inv.fileName.startsWith('000_')
+          );
+
+          if (fresh.length > 0) {
+            const domStats = parseStatsFromDOM();
+            return {
+              invoices: fresh.map((inv) => ({
+                amount: inv.amount,
+                issueDate: inv.date,
+                date: inv.date,
+                projectName: inv.itemName,
+                itemName: inv.itemName,
+                fileName: inv.fileName,
+                isTrip: !!inv.isTrip,
+                trip: inv.trip || null,
+              })),
+              totalAmount: domStats.totalAmount,
+              totalCount: fresh.length,
+            };
+          }
+
+          for (const [name] of window.__fileDebugCache.entries()) {
+            if (
+              name.toLowerCase().endsWith('.pdf') &&
+              !name.includes('_副本') &&
+              !/^报销单[_-]|^报销单\.pdf$/i.test(name) &&
+              !name.startsWith('000_')
+            ) {
+              invoices.push({
+                amount: 0,
+                date: new Date(),
+                issueDate: new Date(),
+                projectName: '电子发票',
+                itemName: '电子发票',
+                fileName: name,
+                isTrip: false,
+                trip: null,
+              });
+            }
+          }
+        }
+
+        const domStats = parseStatsFromDOM();
+        return { invoices, totalAmount: domStats.totalAmount, totalCount: invoices.length };
+      }
+
+      function numberToChinese(money) {
+        const cnNums = ['零', '壹', '贰', '叁', '肆', '伍', '陆', '柒', '捌', '玖'];
+        const cnIntRadice = ['', '拾', '佰', '仟'];
+        const cnIntUnits = ['', '万', '亿', '兆'];
+        const cnDecUnits = ['角', '分'];
+        const cnInteger = '整';
+        const cnIntLast = '元';
+        const maxNum = 999999999999.99;
+
+        if (money === 0) return '零元整';
+        if (money >= maxNum) return '金额过大';
+
+        let integerNum;
+        let decimalNum;
+        let chineseStr = '';
+        let parts;
+
+        money = parseFloat(money);
+        if (money < 0) return '';
+
+        if (money === 0) {
+          chineseStr = cnNums[0] + cnIntLast + cnInteger;
+          return chineseStr;
+        }
+
+        money = money.toString();
+        if (money.indexOf('.') === -1) {
+          integerNum = money;
+          decimalNum = '';
+        } else {
+          parts = money.split('.');
+          integerNum = parts[0];
+          decimalNum = parts[1].substr(0, 2);
+        }
+
+        if (parseInt(integerNum, 10) > 0) {
+          let zeroCount = 0;
+          const IntLen = integerNum.length;
+          for (let i = 0; i < IntLen; i++) {
+            const n = integerNum.substr(i, 1);
+            const p = IntLen - i - 1;
+            const q = p / 4;
+            const m = p % 4;
+
+            if (n === '0') {
+              zeroCount++;
+            } else {
+              if (zeroCount > 0) {
+                chineseStr += cnNums[0];
+              }
+              zeroCount = 0;
+              chineseStr += cnNums[parseInt(n)] + cnIntRadice[m];
+            }
+
+            if (m === 0 && zeroCount < 4) {
+              chineseStr += cnIntUnits[q];
+            }
+          }
+          chineseStr += cnIntLast;
+        }
+
+        if (decimalNum !== '') {
+          const decLen = decimalNum.length;
+          for (let i = 0; i < decLen; i++) {
+            const n = decimalNum.substr(i, 1);
+            if (n !== '0') {
+              chineseStr += cnNums[Number(n)] + cnDecUnits[i];
+            }
+          }
+        }
+
+        if (chineseStr === '') {
+          chineseStr += cnNums[0] + cnIntLast + cnInteger;
+        } else if (decimalNum === '') {
+          chineseStr += cnInteger;
+        }
+
+        return chineseStr;
+      }
+
+      // ------------------------------------------------------------------
+      // 差旅报销单配置：卡片上的出差起止日期 / 地点 / 原因 / 每日补贴
+      // 也可在控制台用 window.setTripExpenseConfig({...}) 覆盖（含费用归类关键词）
+      // ------------------------------------------------------------------
+      window.__tripExpenseConfig = Object.assign(
+        { startDate: '', endDate: '', location: '', reason: '', dailyAllowance: 50,
+          traveler: '', formNo: 'YF-FBCW10-2022' },
+        window.__tripExpenseConfig || {}
+      );
+
+      window.setTripExpenseConfig = function (patch) {
+        window.__tripExpenseConfig = Object.assign({}, window.__tripExpenseConfig, patch || {});
+        return window.__tripExpenseConfig;
+      };
+
+      function readTripConfigFromUI() {
+        const cfg = Object.assign({}, window.__tripExpenseConfig);
+        const val = (id) => {
+          const el = document.getElementById(id);
+          return el ? el.value : null;
+        };
+        const s = val('__er_trip_start'), e = val('__er_trip_end');
+        const loc = val('__er_trip_location'), reason = val('__er_trip_reason');
+        const allowance = val('__er_trip_allowance');
+        const traveler = val('__er_trip_traveler'), formNo = val('__er_trip_formno');
+        if (s !== null) cfg.startDate = s || '';
+        if (e !== null) cfg.endDate = e || '';
+        if (loc !== null) cfg.location = loc || '';
+        if (reason !== null) cfg.reason = reason || '';
+        if (traveler !== null) cfg.traveler = traveler || '';
+        if (formNo !== null) cfg.formNo = formNo || '';
+        if (allowance !== null && allowance !== '') {
+          const n = parseFloat(allowance);
+          if (!isNaN(n) && n >= 0) cfg.dailyAllowance = n;
+        }
+        if (cfg.startDate && cfg.endDate && cfg.startDate > cfg.endDate) {
+          console.warn('⚠️ 出差结束日期早于开始日期，已自动对调');
+          const t = cfg.startDate; cfg.startDate = cfg.endDate; cfg.endDate = t;
+        }
+        window.__tripExpenseConfig = cfg;
+        return cfg;
+      }
+
+      // 差旅费报销单：表格生成已拆到 static/js/custom/expense-report-table.js
+      // 保留原函数签名，自动/手动生成两条链路无需改动。
+      function generateExpenseReportHTML(invoiceData, totalAmountOverride, tripConfig) {
+        const api = window.__expenseReportTable;
+        if (!api) throw new Error("差旅报销单模块未加载：static/js/custom/expense-report-table.js");
+        const uiCfg = (typeof readTripConfigFromUI === "function") ? readTripConfigFromUI() : {};
+        const cfg = Object.assign({}, window.__tripExpenseConfig || {}, uiCfg, tripConfig || {});
+        return api.generateExpenseReportHTML(invoiceData, totalAmountOverride, cfg, { numberToChinese });
+      }
+
+      async function generateExpenseReport() {
+        try {
+          showProcessingNotification('正在生成报销单');
+
+          if (typeof html2canvas === 'undefined') throw new Error('html2canvas 库未加载，请检查网络连接');
+          if (!window.jspdf) throw new Error('jsPDF 库未加载，请检查网络连接');
+          if (!window.PDFLib) throw new Error('PDF-lib 库未加载，请检查网络连接');
+
+          if (window.__fileDebugCache && window.__fileDebugCache.size > 0) {
+            const rePending = [];
+            for (const [name, file] of window.__fileDebugCache.entries()) {
+              if (name.toLowerCase().endsWith('.pdf') &&
+                !name.includes('_副本') && !/^报销单[_-]|^报销单\.pdf$/i.test(name) && !name.startsWith('000_')) {
+                rePending.push(extractInvoiceDataFromPdf(name, file).then(d => { window.__invoiceDataCache[name] = d; }));
+              }
+            }
+            if (rePending.length > 0) await Promise.all(rePending);
+          }
+
+          const data = await getInvoiceDataFromApp();
+          const invoiceData = Array.isArray(data) ? data : (data.invoices || []);
+
+          if (!invoiceData || invoiceData.length === 0) {
+            const oldNotif = document.getElementById('processing-notification');
+            if (oldNotif) oldNotif.remove();
+            alert('❌ 请先上传发票文件\n\n提示：上传后稍等片刻，系统会自动识别发票信息。');
+            return;
+          }
+
+          const totalAmountFromStats = (data && data.totalAmount != null) ? data.totalAmount : null;
+          console.log('📋 发票数量:', invoiceData.length, '总金额(与统计一致):', totalAmountFromStats, '发票数据:', invoiceData.map(i => ({
+            project: i.projectName || i.itemName, amount: i.amount
+          })));
+
+          const reportHTML = generateExpenseReportHTML(invoiceData, totalAmountFromStats);
+
+          const container = document.createElement('div');
+          container.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:-1;';
+          container.innerHTML = reportHTML;
+          document.body.appendChild(container);
+
+          const reportPages = container.querySelectorAll('.expenseReportPage');
+          const { jsPDF } = window.jspdf;
+          const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
+          const pW = pdf.internal.pageSize.getWidth();
+          const pH = pdf.internal.pageSize.getHeight();
+
+          for (let pi = 0; pi < reportPages.length; pi++) {
+            if (pi > 0) pdf.addPage();
+            const canvas = await html2canvas(reportPages[pi], {
+              scale: 4, useCORS: true, logging: false, backgroundColor: '#ffffff',
+              windowWidth: 794, width: 794, height: 1123,
+            });
+            const imgData = canvas.toDataURL('image/png');
+            const imgAspect = canvas.width / canvas.height;
+            const pdfAspect = pW / pH;
+            let drawW, drawH, dx = 0, dy = 0;
+            if (imgAspect > pdfAspect) {
+              drawW = pW; drawH = pW / imgAspect; dy = (pH - drawH) / 2;
+            } else {
+              drawH = pH; drawW = pH * imgAspect; dx = (pW - drawW) / 2;
+            }
+            pdf.addImage(imgData, 'PNG', dx, dy, drawW, drawH);
+          }
+          document.body.removeChild(container);
+
+          const reportPdfBytes = pdf.output('arraybuffer');
+          console.log('✅ 报销单PDF生成完成，字节数:', reportPdfBytes.byteLength, '页数:', reportPages.length);
+
+          await mergeReportWithInvoicesForPreview(reportPdfBytes, invoiceData);
+
+          showSuccessNotification('✅ 报销单已生成并合并！请在右侧预览窗口查看，可直接下载打印。');
+        } catch (error) {
+          console.error('❌ 生成报销单失败:', error);
+          const oldNotif = document.getElementById('processing-notification');
+          if (oldNotif) oldNotif.remove();
+          alert('❌ 生成报销单失败: ' + error.message);
+        }
+      }
+
+      window.generateExpenseReport = generateExpenseReport;
+
+      async function generateExpenseReportManual() {
+        try {
+          if (typeof html2canvas === 'undefined') throw new Error('html2canvas 库未加载');
+          if (!window.jspdf) throw new Error('jsPDF 库未加载');
+          if (!window.PDFLib) throw new Error('PDF-lib 库未加载');
+
+          if (window.__fileDebugCache && window.__fileDebugCache.size > 0) {
+            const rePending = [];
+            for (const [name, file] of window.__fileDebugCache.entries()) {
+              if (name.toLowerCase().endsWith('.pdf') &&
+                !name.includes('_副本') && !/^报销单[_-]|^报销单\.pdf$/i.test(name) && !name.startsWith('000_')) {
+                rePending.push(extractInvoiceDataFromPdf(name, file).then(d => { window.__invoiceDataCache[name] = d; }));
+              }
+            }
+            if (rePending.length > 0) await Promise.all(rePending);
+          }
+
+          const data = await getInvoiceDataFromApp();
+          const invoiceData = Array.isArray(data) ? data : (data.invoices || []);
+
+          if (!invoiceData || invoiceData.length === 0) {
+            alert('❌ 请先上传发票文件');
+            return;
+          }
+
+          const confirmed = await showInvoiceEditDialog(invoiceData);
+          if (!confirmed) return;
+
+          showProcessingNotification('正在生成报销单');
+
+          const reportHTML = generateExpenseReportHTML(invoiceData, null);
+
+          const container = document.createElement('div');
+          container.style.cssText = 'position:fixed;left:-9999px;top:0;z-index:-1;';
+          container.innerHTML = reportHTML;
+          document.body.appendChild(container);
+
+          const reportPages = container.querySelectorAll('.expenseReportPage');
+          const { jsPDF } = window.jspdf;
+          const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
+          const pW = pdf.internal.pageSize.getWidth();
+          const pH = pdf.internal.pageSize.getHeight();
+
+          for (let pi = 0; pi < reportPages.length; pi++) {
+            if (pi > 0) pdf.addPage();
+            const canvas = await html2canvas(reportPages[pi], {
+              scale: 4, useCORS: true, logging: false, backgroundColor: '#ffffff',
+              windowWidth: 794, width: 794, height: 1123,
+            });
+            const imgData = canvas.toDataURL('image/png');
+            const imgAspect = canvas.width / canvas.height;
+            const pdfAspect = pW / pH;
+            let drawW, drawH, dx = 0, dy = 0;
+            if (imgAspect > pdfAspect) {
+              drawW = pW; drawH = pW / imgAspect; dy = (pH - drawH) / 2;
+            } else {
+              drawH = pH; drawW = pH * imgAspect; dx = (pW - drawW) / 2;
+            }
+            pdf.addImage(imgData, 'PNG', dx, dy, drawW, drawH);
+          }
+          document.body.removeChild(container);
+
+          const reportPdfBytes = pdf.output('arraybuffer');
+          await mergeReportWithInvoicesForPreview(reportPdfBytes, invoiceData);
+          showSuccessNotification('✅ 报销单已生成并合并！');
+        } catch (error) {
+          console.error('❌ 生成报销单失败:', error);
+          const oldNotif = document.getElementById('processing-notification');
+          if (oldNotif) oldNotif.remove();
+          alert('❌ 生成报销单失败: ' + error.message);
+        }
+      }
+
+      function showInvoiceEditDialog(invoiceData) {
+        return new Promise((resolve) => {
+          const overlay = document.createElement('div');
+          overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:100000;display:flex;align-items:center;justify-content:center;';
+
+          let rows = invoiceData.map((inv, i) => `
+            <tr${inv.isTrip ? ' style="background:#fffbeb;"' : ''}>
+              <td style="padding:8px;border:1px solid #e5e7eb;text-align:center;">${i + 1}</td>
+              <td style="padding:8px;border:1px solid #e5e7eb;text-align:center;font-size:11px;">${inv.isTrip ? '🚕 行程单<br><span style="color:#92400e;">仅核对日期/金额</span>' : '发票'}</td>
+              <td style="padding:4px;border:1px solid #e5e7eb;">
+                <input type="text" data-field="projectName" data-idx="${i}" value="${(inv.projectName || inv.itemName || '电子发票').replace(/"/g, '&quot;')}" ${inv.isTrip ? 'disabled' : ''} style="width:100%;padding:6px;border:1px solid #d1d5db;border-radius:4px;font-size:13px;">
+              </td>
+              <td style="padding:4px;border:1px solid #e5e7eb;">
+                <input type="number" step="0.01" data-field="amount" data-idx="${i}" value="${parseFloat(inv.amount) || 0}" ${inv.isTrip ? 'disabled' : ''} style="width:100%;padding:6px;border:1px solid #d1d5db;border-radius:4px;font-size:13px;text-align:right;">
+              </td>
+              <td style="padding:4px;border:1px solid #e5e7eb;">
+                <input type="date" data-field="date" data-idx="${i}" value="${formatDateForInput(inv.isTrip && inv.trip && inv.trip.primaryDate ? inv.trip.primaryDate : (inv.issueDate || inv.date))}" ${inv.isTrip ? 'disabled' : ''} style="padding:6px;border:1px solid #d1d5db;border-radius:4px;font-size:13px;">
+              </td>
+            </tr>
+          `).join('');
+
+          overlay.innerHTML = `
+            <div style="background:white;border-radius:12px;padding:24px;max-width:700px;width:90%;max-height:80vh;overflow-y:auto;box-shadow:0 20px 60px rgba(0,0,0,0.3);">
+              <h3 style="margin:0 0 16px;font-size:18px;">✏️ 确认发票数据</h3>
+              <table style="width:100%;border-collapse:collapse;font-size:13px;">
+                <thead>
+                  <tr style="background:#f9fafb;">
+                    <th style="padding:8px;border:1px solid #e5e7eb;width:40px;">序号</th>
+                    <th style="padding:8px;border:1px solid #e5e7eb;width:96px;">类型</th>
+                    <th style="padding:8px;border:1px solid #e5e7eb;">项目名称</th>
+                    <th style="padding:8px;border:1px solid #e5e7eb;width:120px;">金额(元)</th>
+                    <th style="padding:8px;border:1px solid #e5e7eb;width:140px;">日期</th>
+                  </tr>
+                </thead>
+                <tbody>${rows}</tbody>
+              </table>
+              <div style="display:flex;justify-content:flex-end;gap:10px;margin-top:16px;">
+                <button id="__er_edit_cancel" style="padding:8px 20px;border:1px solid #d1d5db;border-radius:6px;background:white;cursor:pointer;font-size:14px;">取消</button>
+                <button id="__er_edit_confirm" style="padding:8px 20px;border:none;border-radius:8px;background:#4338ca;color:white;cursor:pointer;font-size:14px;font-weight:600;box-shadow:0 4px 12px rgba(67,56,202,0.22);">确认生成</button>
+              </div>
+            </div>
+          `;
+
+          document.body.appendChild(overlay);
+
+          overlay.querySelector('#__er_edit_cancel').addEventListener('click', () => {
+            document.body.removeChild(overlay);
+            resolve(false);
+          });
+
+          overlay.querySelector('#__er_edit_confirm').addEventListener('click', () => {
+            overlay.querySelectorAll('input[data-field="projectName"]').forEach(input => {
+              const idx = parseInt(input.dataset.idx);
+              invoiceData[idx].projectName = input.value;
+              invoiceData[idx].itemName = input.value;
+            });
+            overlay.querySelectorAll('input[data-field="amount"]').forEach(input => {
+              const idx = parseInt(input.dataset.idx);
+              invoiceData[idx].amount = parseFloat(input.value) || 0;
+            });
+            overlay.querySelectorAll('input[data-field="date"]').forEach(input => {
+              const idx = parseInt(input.dataset.idx);
+              if (input.value) {
+                invoiceData[idx].issueDate = new Date(input.value);
+                invoiceData[idx].date = new Date(input.value);
+              }
+            });
+            document.body.removeChild(overlay);
+            resolve(true);
+          });
+        });
+      }
+
+      function formatDateForInput(d) {
+        try {
+          const date = d instanceof Date ? d : new Date(d);
+          if (isNaN(date.getTime())) return '';
+          return date.toISOString().split('T')[0];
+        } catch (e) { return ''; }
+      }
+
+      window.generateExpenseReportManual = generateExpenseReportManual;
+
+      function downloadPdf(pdfData, filename) {
+        const blob = pdfData instanceof Blob ? pdfData : new Blob([pdfData], { type: 'application/pdf' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        setTimeout(() => URL.revokeObjectURL(url), 5000);
+      }
+
+      async function getInvoicePdfFiles() {
+        const pdfFiles = [];
+        if (!window.__fileDebugCache || window.__fileDebugCache.size === 0) return pdfFiles;
+        for (const [name, file] of window.__fileDebugCache.entries()) {
+          if (name.toLowerCase().endsWith('.pdf') &&
+            !name.includes('_副本') && !/^报销单[_-]|^报销单\.pdf$/i.test(name) && !name.startsWith('000_')) {
+            try { pdfFiles.push(await file.arrayBuffer()); } catch (e) { console.error('加载PDF失败:', name, e); }
+          }
+        }
+        return pdfFiles;
+      }
+
+      async function _legacyGetInvoiceDataFromApp() {
+
+        await new Promise(resolve => setTimeout(resolve, 500));
+
+        let invoices = [];
+
+        try {
+          const rootElement = document.querySelector('#__next') || document.querySelector('[data-reactroot]') || document.body;
+          if (rootElement) {
+            const fiberKey = Object.keys(rootElement).find(key =>
+              key.startsWith('__reactFiber') || key.startsWith('__reactInternalInstance')
+            );
+
+            if (fiberKey) {
+              let fiber = rootElement[fiberKey];
+
+              const findStats = (node, depth = 0) => {
+                if (depth > 20) return null;
+
+                if (node && node.memoizedState) {
+
+                  let current = node.memoizedState;
+                  while (current) {
+                    if (current.memoizedState && current.memoizedState.stats) {
+                      return current.memoizedState.stats;
+                    }
+                    if (current.memoizedState && current.memoizedState.invoices) {
+                      return { invoices: current.memoizedState.invoices };
+                    }
+                    current = current.next;
+                  }
+                }
+
+                if (node.child) {
+                  const result = findStats(node.child, depth + 1);
+                  if (result) return result;
+                }
+                if (node.sibling) {
+                  const result = findStats(node.sibling, depth + 1);
+                  if (result) return result;
+                }
+
+                return null;
+              };
+
+              const stats = findStats(fiber);
+              if (stats && stats.invoices && stats.invoices.length > 0) {
+
+                invoices = stats.invoices.map((inv, index) => {
+                  const mapped = {
+
+                    number: inv.number || inv.invoiceNumber || '',
+                    amount: (inv.total || inv.amount || 0) / 100,
+                    issueDate: inv.date || inv.invoiceDate || inv.issueDate || inv.billingDate || new Date(),
+                    date: inv.date || inv.invoiceDate || inv.issueDate || inv.billingDate || new Date(),
+                    projectName: inv.itemName || inv.goodsName || inv.projectName || inv.item || inv.name || '',
+                    itemName: inv.itemName || inv.goodsName || inv.item || inv.name || '',
+                    code: inv.code || inv.invoiceCode || '',
+                    name: inv.fileName || inv.name || '电子发票'
+                  };
+
+                  return mapped;
+                });
+
+                let totalAmount = null;
+                if (stats.totalAmount !== undefined) totalAmount = stats.totalAmount / 100;
+                else if (stats.total !== undefined) totalAmount = stats.total / 100;
+                else if (stats.amount !== undefined) totalAmount = stats.amount / 100;
+
+                return {
+                  invoices: invoices,
+                  totalAmount: totalAmount,
+                  totalCount: stats.totalCount || invoices.length
+                };
+              }
+            }
+          }
+        } catch (error) {
+          console.log('⚠️ 从React状态获取失败:', error.message);
+        }
+
+        if (invoices.length === 0) {
+          const processedFiles = new Set();
+
+          const allElements = document.querySelectorAll('*');
+          allElements.forEach(elem => {
+            const text = elem.textContent || '';
+            if (text.includes('.pdf') && text.length < 300) {
+              const pdfMatches = text.match(/([^\s\/\\]+\.pdf)/gi);
+              if (pdfMatches) {
+                pdfMatches.forEach(fileName => {
+                  if (!processedFiles.has(fileName) && !fileName.includes('_副本')) {
+                    processedFiles.add(fileName);
+
+                    const amountPatterns = [
+                      /_(\d+\.?\d*)_/,
+                      /_(\d+\.?\d*)\./,
+                      /(\d+\.?\d*)_/,
+                      /_(\d+)\.(\d+)_/,
+                    ];
+
+                    let amount = 0;
+                    for (const pattern of amountPatterns) {
+                      const match = fileName.match(pattern);
+                      if (match) {
+                        amount = parseFloat(match[1]);
+                        break;
+                      }
+                    }
+
+                    if (amount === 0) {
+                      const parentText = elem.parentElement?.textContent || '';
+                      const amountMatch = parentText.match(/(\d+\.?\d*)\s*元|¥\s*(\d+\.?\d*)/);
+                      if (amountMatch) {
+                        amount = parseFloat(amountMatch[1] || amountMatch[2]);
+                      }
+                    }
+
+                    invoices.push({
+                      name: fileName.replace('.pdf', ''),
+                      amount: amount,
+                      date: new Date()
+                    });
+                  }
+                });
+              }
+            }
+          });
+        }
+
+        if (invoices.length === 0) {
+          console.log('🔍 方法3: 从统计信息提取...');
+
+          const statsElements = document.querySelectorAll('*');
+          let invoiceCount = 0;
+          let totalAmount = 0;
+
+          statsElements.forEach(elem => {
+            const text = elem.textContent || '';
+
+            const countMatch = text.match(/发票数量[：:]\s*(\d+)|(\d+)\s*张/);
+            if (countMatch && !invoiceCount) {
+              invoiceCount = parseInt(countMatch[1] || countMatch[2]);
+            }
+
+            const amountMatch = text.match(/总金额[：:]\s*¥?\s*([\d,]+\.?\d*)|¥\s*([\d,]+\.?\d*)/);
+            if (amountMatch && !totalAmount) {
+              totalAmount = parseFloat((amountMatch[1] || amountMatch[2]).replace(/,/g, ''));
+            }
+          });
+
+          if (invoiceCount > 0 && totalAmount > 0) {
+            const avgAmount = totalAmount / invoiceCount;
+            for (let i = 0; i < invoiceCount; i++) {
+              invoices.push({
+                name: `电子发票${i + 1}`,
+                amount: i === invoiceCount - 1 ?
+                  totalAmount - (avgAmount * (invoiceCount - 1)) :
+                  avgAmount,
+                date: new Date()
+              });
+            }
+          }
+        }
+
+        return {
+          invoices: invoices,
+          totalAmount: null, // 从DOM提取时无法保证总金额精度，设为null让后续逻辑重新计算
+          totalCount: invoices.length
+        };
+      }
+
+      async function mergeReportWithInvoicesForPreview(reportPdfBytes, invoiceData) {
+        showProcessingNotification('正在合并PDF');
+        window.__isGeneratingReport = true;
+
+        try {
+          const { PDFDocument } = PDFLib;
+
+          let basePdfBytes = null;
+
+          if (window.__invoiceMergedBlob) {
+            try {
+              basePdfBytes = await window.__invoiceMergedBlob.arrayBuffer();
+              console.log('✅ 从__invoiceMergedBlob获取到PDF, size:', basePdfBytes.byteLength);
+            } catch (e) {
+              console.warn('读取__invoiceMergedBlob失败', e);
+            }
+          }
+
+          if (!basePdfBytes && window.__lastPdfBlobUrl) {
+            try {
+              const resp = await fetch(window.__lastPdfBlobUrl);
+              basePdfBytes = await resp.arrayBuffer();
+              console.log('✅ 从__lastPdfBlobUrl获取到PDF');
+            } catch (e) {
+              console.warn('fetch __lastPdfBlobUrl failed', e);
+            }
+          }
+
+          if (!basePdfBytes) {
+            console.log('⚠️ 未从React获取到PDF，使用缓存文件');
+            const pdfFiles = await getInvoicePdfFiles();
+            console.log('📦 缓存中PDF文件数:', pdfFiles.length);
+            if (pdfFiles.length > 0) {
+              const tmpPdf = await PDFDocument.create();
+              for (const f of pdfFiles) {
+                const src = await PDFDocument.load(f, { ignoreEncryption: true });
+                const pages = await tmpPdf.copyPages(src, src.getPageIndices());
+                pages.forEach((p) => tmpPdf.addPage(p));
+              }
+              basePdfBytes = await tmpPdf.save();
+            }
+          }
+
+          const mergedPdf = basePdfBytes
+            ? await PDFDocument.load(basePdfBytes)
+            : await PDFDocument.create();
+
+          const rptSrc = await PDFDocument.load(reportPdfBytes);
+          const invoicePageCount = mergedPdf.getPageCount();
+
+          const A4W = 595.28, A4H = 841.89;
+          const isAlreadyA4 = invoicePageCount > 0 && (function() {
+            const pg = mergedPdf.getPage(0);
+            const { width, height } = pg.getSize();
+            return Math.abs(width - A4W) < 10 && Math.abs(height - A4H) < 10;
+          })();
+
+          let finalPdf;
+          if (isAlreadyA4) {
+
+            // 报销单按 A4 整页追加，不再占用发票双联的半页槽位
+            finalPdf = mergedPdf;
+            for (const p of rptSrc.getPages()) {
+              const [ep] = await finalPdf.embedPages([p]);
+              const pg = finalPdf.addPage([A4W, A4H]);
+              pg.drawPage(ep, { x: 0, y: 0, width: A4W, height: A4H });
+            }
+          } else {
+
+            finalPdf = await PDFDocument.create();
+            const halfH = A4H / 2;
+            let slotUsed = 0;
+
+            for (let i = 0; i < invoicePageCount; i++) {
+              const srcPage = mergedPdf.getPage(i);
+              const ew = srcPage.getSize().width, eh = srcPage.getSize().height;
+              const rot = srcPage.getRotation().angle || 0;
+
+              const cropBox = srcPage.getCropBox();
+              const mediaBox = srcPage.getMediaBox();
+
+              const cbLeft = Math.min(cropBox.x, cropBox.x + cropBox.width);
+              const cbRight = Math.max(cropBox.x, cropBox.x + cropBox.width);
+              const cbBottom = Math.min(cropBox.y, cropBox.y + cropBox.height);
+              const cbTop = Math.max(cropBox.y, cropBox.y + cropBox.height);
+              const cbW = cbRight - cbLeft, cbH = cbTop - cbBottom;
+              let bbox;
+              if (cbW < mediaBox.width * 0.95 || cbH < mediaBox.height * 0.95) {
+                bbox = {left: cbLeft, bottom: cbBottom, right: cbRight, top: cbTop};
+              }
+              const [embedded] = bbox
+                ? await finalPdf.embedPages([srcPage], [bbox])
+                : await finalPdf.embedPages([srcPage]);
+
+              const vw = embedded.width, vh = embedded.height;
+              let page;
+              if (slotUsed === 0 || slotUsed === 2) {
+                page = finalPdf.addPage([A4W, A4H]);
+                slotUsed = 1;
+              } else {
+                page = finalPdf.getPage(finalPdf.getPageCount() - 1);
+                slotUsed = 2;
+              }
+              const isTop = (slotUsed === 1);
+              const scale = Math.min(A4W / vw, halfH / vh);
+              const w = vw * scale, h = vh * scale;
+              const x = (A4W - w) / 2;
+              const y = isTop ? (A4H - h) : (halfH - h) / 2;
+              page.drawPage(embedded, { x, y, width: w, height: h });
+            }
+
+            const rptPages = rptSrc.getPages();
+            for (let ri = 0; ri < rptPages.length; ri++) {
+              const [ep] = await finalPdf.embedPages([rptPages[ri]]);
+              const page = finalPdf.addPage([A4W, A4H]);
+              page.drawPage(ep, { x: 0, y: 0, width: A4W, height: A4H });
+            }
+          }
+
+          const mergedBytes = await finalPdf.save();
+          const blob = new Blob([mergedBytes], { type: 'application/pdf' });
+          window.__currentExpenseReportBlob = blob;
+          window.__mergedPdfBlobUrl = URL.createObjectURL(blob);
+          showMergedPreview(window.__mergedPdfBlobUrl, finalPdf.getPageCount(), false);
+
+          console.log(
+            `✅ 合并完成：${invoicePageCount} 页发票 + 报销单，总 ${finalPdf.getPageCount()} 页`
+          );
+        } catch (error) {
+          console.error('❌ 合并PDF失败:', error);
+          throw error;
+        } finally {
+          window.__isGeneratingReport = false;
+        }
+      }
+
+      function showMergedPreview(blobUrl, totalPages) {
+
+        const pdfDoc = document.querySelector('.react-pdf__Document');
+        if (!pdfDoc) {
+          console.warn('⚠️ 未找到 .react-pdf__Document');
+          return;
+        }
+
+        const scrollParent = pdfDoc.parentElement;
+        if (!scrollParent) return;
+
+        const iframe = document.createElement('iframe');
+        iframe.id = '__er_merged_preview';
+
+        iframe.src = blobUrl + '#navpanes=0&toolbar=0&zoom=page-width';
+        iframe.style.cssText =
+          'display:block;width:calc(100% - 32px);flex:1;min-height:300px;border:none;background:#ffffff;box-sizing:border-box;margin:0 16px;';
+
+        pdfDoc.style.display = 'none';
+
+        const old = document.getElementById('__er_merged_preview');
+        if (old) old.remove();
+
+        scrollParent.style.overflow = 'hidden';
+        scrollParent.style.position = 'relative';
+        scrollParent.style.display = 'flex';
+        scrollParent.style.flexDirection = 'column';
+        scrollParent.style.flex = '1';
+        scrollParent.style.background = '#ffffff';
+        scrollParent.appendChild(iframe);
+
+        const sec = document.querySelector('section[aria-label="发票处理工作区"]');
+        if (sec) sec.classList.add('merged-preview');
+
+        if (totalPages) {
+          const container =
+            scrollParent.closest('[data-slot="card"]') || scrollParent.parentElement?.parentElement;
+          if (container) {
+            const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
+            while (walker.nextNode()) {
+              const node = walker.currentNode;
+              const text = node.textContent.trim();
+              if (
+                /^\d+$/.test(text) &&
+                node.parentElement &&
+                node.parentElement.closest &&
+                !node.parentElement.closest('.react-pdf__Document')
+              ) {
+                const num = parseInt(text);
+                if (num >= 1 && num <= 20) {
+                  node.textContent = String(totalPages);
+                  break;
+                }
+              }
+            }
+          }
+        }
+
+        console.log('✅ 合并PDF已显示在预览区');
+      }
+
+      async function showPdfInPreviewOnly(pdfBlob) {
+        const blobUrl = URL.createObjectURL(pdfBlob);
+        window.__mergedPdfBlobUrl = blobUrl;
+
+        showMergedPreview(blobUrl, null, false);
+        const oldFloat = document.getElementById('__er_float_panel');
+        if (oldFloat) oldFloat.remove();
+      }
+
+      function addDownloadButton(pdfBlob, ds) {
+        let dlBar = document.getElementById('__er_dl_bar');
+        if (dlBar) dlBar.remove();
+        dlBar = document.createElement('div');
+        dlBar.id = '__er_dl_bar';
+        dlBar.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:99999;';
+        dlBar.innerHTML = `<button id="__er_dl_btn" style="padding:10px 24px;background:#4338ca;color:white;border:none;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer;box-shadow:0 6px 16px rgba(67,56,202,0.22);">⬇️ 下载合并PDF</button>`;
+        document.body.appendChild(dlBar);
+        document.getElementById('__er_dl_btn').addEventListener('click', () => downloadPdf(pdfBlob, `报销单_${ds}.pdf`));
+      }
+
+      function addDownloadButtonToPreview(pdfBlob) {
+
+        window.__currentExpenseReportBlob = pdfBlob || window.__currentExpenseReportBlob;
+      }
+
+      async function deleteExpenseReport() {
+        window.__currentExpenseReportBlob = null;
+        const dlBar = document.getElementById('__er_dl_bar');
+        if (dlBar) dlBar.remove();
+
+        const iframe = document.getElementById('__er_merged_preview');
+        if (iframe) iframe.remove();
+
+        const sec = document.querySelector('section[aria-label="发票处理工作区"]');
+        if (sec) sec.classList.remove('merged-preview');
+
+        const pdfDoc = document.querySelector('.react-pdf__Document');
+        if (pdfDoc) pdfDoc.style.display = '';
+
+        if (window.__mergedPdfBlobUrl) {
+          URL.revokeObjectURL(window.__mergedPdfBlobUrl);
+          window.__mergedPdfBlobUrl = null;
+        }
+
+        showSuccessNotification('✅ 报销单已删除');
+      }
+      window.deleteExpenseReport = deleteExpenseReport;
+
+      function addExpenseReportCard() {
+        if (document.querySelector('.expense-report-operations-card')) return;
+
+        let statsCard = null;
+        for (const el of document.querySelectorAll('[data-slot="card"]')) {
+          const t = el.textContent || '';
+          if (t.includes('发票数量') || t.includes('总金额') || t.includes('发票统计')) { statsCard = el; break; }
+        }
+        if (!statsCard) {
+          for (const el of document.querySelectorAll('*')) {
+            const t = el.textContent || '';
+            if (t.length < 400 && (t.includes('发票数量') || t.includes('总金额'))) {
+              statsCard = el.closest('[data-slot="card"]') || el.parentElement; break;
+            }
+          }
+        }
+        if (!statsCard) return;
+
+        console.log('✅ 找到容器，插入报销单卡片');
+
+        const card = document.createElement('div');
+        card.className = 'expense-report-operations-card';
+        card.setAttribute('data-slot', 'card');
+        card.style.cssText = `
+          background:white; border-radius:12px; border:1px solid #e5e7eb;
+          box-shadow:0 1px 4px rgba(0,0,0,0.1); padding:20px 24px; margin-top:16px;
+          flex:none !important;
+        `;
+        card.innerHTML = `
+          <div data-slot="card-header" style="padding:0;margin-bottom:12px;">
+            <div data-slot="card-title" style="font-weight:700;font-size:1rem;">📋 生成报销单</div>
+            <p style="font-size:12px;color:#6b7280;margin-top:5px;line-height:1.5;">
+              差旅报销单：行程单核对日期与金额，按天计补贴 | 手动确认可编辑项目名和金额
+            </p>
+          </div>
+          <div class="er-trip-config" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:12px;padding:10px 12px;background:#fafbff;border:1px solid #e8ecf7;border-radius:8px;">
+            <div style="grid-column:1/-1;font-size:12px;font-weight:600;color:#374151;">🧳 出差信息</div>
+            <label style="font-size:11px;color:#4b5563;display:flex;flex-direction:column;gap:3px;">出差开始
+              <input id="__er_trip_start" type="date" style="padding:5px 6px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;">
+            </label>
+            <label style="font-size:11px;color:#4b5563;display:flex;flex-direction:column;gap:3px;">出差结束
+              <input id="__er_trip_end" type="date" style="padding:5px 6px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;">
+            </label>
+            <label style="font-size:11px;color:#4b5563;display:flex;flex-direction:column;gap:3px;">出差地点
+              <input id="__er_trip_location" type="text" placeholder="如：上海" style="padding:5px 6px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;">
+            </label>
+            <label style="font-size:11px;color:#4b5563;display:flex;flex-direction:column;gap:3px;">出差原因
+              <input id="__er_trip_reason" type="text" placeholder="如：客户拜访" style="padding:5px 6px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;">
+            </label>
+            <label style="font-size:11px;color:#4b5563;display:flex;flex-direction:column;gap:3px;">出差人
+              <input id="__er_trip_traveler" type="text" placeholder="请输入出差人" style="padding:5px 6px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;">
+            </label>
+            <label style="font-size:11px;color:#4b5563;display:flex;flex-direction:column;gap:3px;">表单编号
+              <input id="__er_trip_formno" type="text" placeholder="YF-FBCW10-2022" style="padding:5px 6px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;">
+            </label>
+            <label style="font-size:11px;color:#4b5563;display:flex;flex-direction:column;gap:3px;">每日补贴（元）
+              <input id="__er_trip_allowance" type="number" min="0" step="1" value="50" style="padding:5px 6px;border:1px solid #d1d5db;border-radius:5px;font-size:12px;">
+            </label>
+            <div style="grid-column:1/-1;font-size:11px;color:#6b7280;line-height:1.5;">
+              日期留空时按票据日期自动推断；行程单只用于核对日期与金额，不重复计入报销金额。
+            </div>
+          </div>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <button class="er-btn-gen" style="
+              flex:1;min-width:130px;padding:10px 16px;
+              background:#f0fdf4;
+              color:#15803d;border:1px solid #bbf7d0;border-radius:8px;font-size:14px;font-weight:600;
+              cursor:pointer;box-shadow:0 1px 3px rgba(21,128,61,0.08);transition:filter 0.2s;">
+              📋 自动生成报销单
+            </button>
+            <button class="er-btn-manual" style="
+              flex:1;min-width:130px;padding:10px 16px;
+              background:#eef0f6;
+              color:#3730a3;border:none;border-radius:8px;font-size:14px;font-weight:600;
+              cursor:pointer;box-shadow:0 1px 3px rgba(30,35,48,0.06);transition:filter 0.2s;">
+              ✏️ 手动确认生成报销单
+            </button>
+            <button class="er-btn-dl" style="
+              flex:1;min-width:130px;padding:10px 16px;
+              background:white;
+              color:#4338ca;border:1px solid #c7cbe8;border-radius:8px;font-size:14px;font-weight:600;
+              cursor:pointer;box-shadow:0 1px 3px rgba(30,35,48,0.06);transition:filter 0.2s;">
+              ⬇️ 生成并下载
+            </button>
+            <button class="er-btn-del" style="
+              padding:10px 14px;background:white;color:#ef4444;
+              border:1px solid #fca5a5;border-radius:8px;font-size:14px;
+              cursor:pointer;transition:background 0.2s;">
+              🗑️
+            </button>
+          </div>
+        `;
+
+        const _tc = window.__tripExpenseConfig || {};
+        const _setTripVal = (id, v) => {
+          const el = card.querySelector('#' + id);
+          if (el && v !== undefined && v !== null && v !== '') el.value = v;
+        };
+        _setTripVal('__er_trip_start', _tc.startDate);
+        _setTripVal('__er_trip_end', _tc.endDate);
+        _setTripVal('__er_trip_location', _tc.location);
+        _setTripVal('__er_trip_reason', _tc.reason);
+        _setTripVal('__er_trip_allowance', _tc.dailyAllowance);
+        _setTripVal('__er_trip_traveler', _tc.traveler);
+        _setTripVal('__er_trip_formno', _tc.formNo);
+        card.querySelectorAll('.er-trip-config input').forEach(el => {
+          el.addEventListener('change', () => readTripConfigFromUI());
+        });
+
+        const genBtn = card.querySelector('.er-btn-gen');
+        const manualBtn = card.querySelector('.er-btn-manual');
+        const dlBtn  = card.querySelector('.er-btn-dl');
+        const delBtn = card.querySelector('.er-btn-del');
+
+        genBtn.addEventListener('click', () => window.generateExpenseReport && window.generateExpenseReport());
+        manualBtn.addEventListener('click', () => window.generateExpenseReportManual && window.generateExpenseReportManual());
+
+        dlBtn.addEventListener('click', async () => {
+          await window.generateExpenseReport();
+          await new Promise(r => setTimeout(r, 2500));
+          const blob = window.__currentExpenseReportBlob;
+          if (blob) {
+            const d = new Date();
+            const ds = `${d.getFullYear()}${String(d.getMonth()+1).padStart(2,'0')}${String(d.getDate()).padStart(2,'0')}`;
+            downloadPdf(blob, `报销单_${ds}.pdf`);
+          }
+        });
+
+        delBtn.addEventListener('click', () => window.deleteExpenseReport && window.deleteExpenseReport());
+        [genBtn, dlBtn, manualBtn].forEach(b => { b.onmouseenter = () => b.style.filter='brightness(1.12)'; b.onmouseleave = () => b.style.filter=''; });
+        delBtn.onmouseenter = () => delBtn.style.background = '#fef2f2';
+        delBtn.onmouseleave = () => delBtn.style.background = 'white';
+
+        statsCard.parentElement.insertBefore(card, statsCard.nextSibling);
+        console.log('✅ 报销单卡片已插入');
+      }
+
+      let _cardAttempts = 0;
+      function tryAddExpenseCard() {
+        if (document.querySelector('.expense-report-operations-card')) return;
+        if (++_cardAttempts > 10) return;
+        addExpenseReportCard();
+      }
+
+      function startCardWatcher() {
+
+        const style = document.createElement('style');
+        style.id = 'expense-layout-style';
+        style.textContent = `
+          section[aria-label="发票处理工作区"] {
+            align-items: start !important;
+          }
+          section[aria-label="发票处理工作区"] > div:first-child {
+            align-self: start !important;
+            height: auto !important;
+          }
+          section[aria-label="发票处理工作区"].merged-preview {
+            align-items: stretch !important;
+          }
+          section[aria-label="发票处理工作区"].merged-preview > div:first-child {
+            align-self: stretch !important;
+            height: auto !important;
+          }
+          section[aria-label="发票处理工作区"].merged-preview > div:first-child {
+            display: flex;
+            flex-direction: column;
+          }
+          section[aria-label="发票处理工作区"].merged-preview > div:first-child > [data-slot="card"] {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+          }
+          section[aria-label="发票处理工作区"].merged-preview > div:first-child > [data-slot="card"] > [data-slot="card-content"] {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+          }
+          section[aria-label="发票处理工作区"].merged-preview > div:first-child > [data-slot="card"] > [data-slot="card-content"] > div {
+            flex: 1;
+            min-height: 0;
+          }
+          section[aria-label="发票处理工作区"].merged-preview > div:first-child .react-pdf__Document {
+            flex: 1;
+            min-height: 0;
+            overflow: auto;
+          }
+          .react-pdf__Page canvas {
+            transform: scale(0.95);
+            transform-origin: top center;
+            margin-top: 24px !important;
+          }
+          .react-pdf__Document {
+            padding-top: 20px;
+          }
+          @media print {
+            .react-pdf__Page canvas {
+              transform: scale(0.85);
+              transform-origin: top center;
+              margin-top: 24px !important;
+            }
+          }
+        `;
+        document.head.appendChild(style);
+
+        setTimeout(tryAddExpenseCard, 2000);
+        setTimeout(tryAddExpenseCard, 4000);
+        setTimeout(tryAddExpenseCard, 8000);
+
+        if (document.body) {
+          const _cardObserver = new MutationObserver(() => {
+            let hasStats = false;
+            for (const el of document.querySelectorAll('[data-slot="card"]')) {
+              const t = el.textContent || '';
+              if (t.includes('发票数量') || t.includes('总金额')) { hasStats = true; break; }
+            }
+            const card = document.querySelector('.expense-report-operations-card');
+            if (hasStats && !card) {
+              addExpenseReportCard();
+            } else if (!hasStats && card) {
+              card.remove();
+            }
+          });
+          _cardObserver.observe(document.body, { childList: true, subtree: true });
+
+          setTimeout(() => _cardObserver.disconnect(), 90000);
+        }
+      }
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', startCardWatcher);
+      } else {
+        startCardWatcher();
+      }
+
+      async function _legacyMergeWithInvoices(reportPdfBytes, invoiceData) {
+        try {
+          showProcessingNotification('正在合并PDF文件...');
+
+          const { PDFDocument } = PDFLib;
+
+          const mergedPdf = await PDFDocument.load(reportPdfBytes);
+
+          const invoicePdfs = await getInvoicePdfFiles(invoiceData);
+
+          if (invoicePdfs.length === 0) {
+
+            const pdfBytes = await mergedPdf.save();
+            downloadPdf(pdfBytes, `报销单_${new Date().getTime()}.pdf`);
+            return;
+          }
+
+          for (let i = 0; i < invoicePdfs.length; i++) {
+            try {
+              const invoicePdfBytes = invoicePdfs[i];
+              const invoicePdf = await PDFDocument.load(invoicePdfBytes);
+              const pages = await mergedPdf.copyPages(invoicePdf, invoicePdf.getPageIndices());
+
+              pages.forEach(page => {
+                mergedPdf.addPage(page);
+              });
+            } catch (error) {
+              console.error(`❌ 添加发票 ${i + 1} 失败:`, error);
+            }
+          }
+
+          const mergedPdfBytes = await mergedPdf.save();
+
+          showPdfInPreview(mergedPdfBytes);
+
+        } catch (error) {
+          console.error('❌ PDF合并失败:', error);
+          throw error;
+        }
+      }
+
+      async function _legacyMergeReportWithInvoices(reportPdfBytes, invoiceData) {
+        try {
+          showProcessingNotification('正在合并PDF文件...');
+
+          const { PDFDocument } = PDFLib;
+
+          const mergedPdf = await PDFDocument.load(reportPdfBytes);
+
+          let existingMergedPdf = null;
+          try {
+            const previewPanel = document.querySelector('.fixed.top-0.right-0.h-full.z-50');
+            if (previewPanel) {
+              const iframe = previewPanel.querySelector('iframe');
+              if (iframe && iframe.src && iframe.src.startsWith('blob:')) {
+                console.log('🔍 发现预览窗口中的PDF:', iframe.src);
+
+                const response = await fetch(iframe.src);
+                const existingPdfBytes = await response.arrayBuffer();
+                existingMergedPdf = await PDFDocument.load(existingPdfBytes);
+                console.log('✅ 成功加载预览窗口中的PDF,页数:', existingMergedPdf.getPageCount());
+              }
+            }
+          } catch (error) {
+            console.log('⚠️ 无法从预览窗口获取PDF:', error.message);
+          }
+
+          if (existingMergedPdf) {
+            console.log('📄 将预览PDF的页面添加到报销单后面');
+            const pages = await mergedPdf.copyPages(existingMergedPdf, existingMergedPdf.getPageIndices());
+            pages.forEach(page => {
+              mergedPdf.addPage(page);
+            });
+          } else {
+
+            console.log('📦 从缓存获取发票文件');
+            const invoicePdfs = await getInvoicePdfFiles(invoiceData);
+
+            if (invoicePdfs.length === 0) {
+              console.warn('⚠️ 没有找到发票文件');
+
+              const pdfBytes = await mergedPdf.save();
+              const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+              showPdfInPreviewOnly(blob);
+              return;
+            }
+
+            for (let i = 0; i < invoicePdfs.length; i++) {
+              try {
+                const invoicePdfBytes = invoicePdfs[i];
+                const invoicePdf = await PDFDocument.load(invoicePdfBytes);
+                const pages = await mergedPdf.copyPages(invoicePdf, invoicePdf.getPageIndices());
+
+                pages.forEach(page => {
+                  mergedPdf.addPage(page);
+                });
+                console.log(`✅ 添加发票 ${i + 1}/${invoicePdfs.length}`);
+              } catch (error) {
+                console.error(`❌ 添加发票 ${i + 1} 失败:`, error);
+              }
+            }
+          }
+
+          const mergedPdfBytes = await mergedPdf.save();
+          const blob = new Blob([mergedPdfBytes], { type: 'application/pdf' });
+
+          console.log('✅ PDF合并完成,总页数:', mergedPdf.getPageCount());
+
+          showPdfInPreviewOnly(blob);
+
+        } catch (error) {
+          console.error('❌ PDF合并失败:', error);
+          throw error;
+        }
+      }
+
+      async function _legacyMergeReportWithInvoicesForPreview(reportPdfBytes, invoiceData) {
+        try {
+          showProcessingNotification('正在合并PDF文件...');
+
+          const { PDFDocument } = PDFLib;
+
+          const mergedPdf = await PDFDocument.load(reportPdfBytes);
+          console.log('📋 报销单PDF已加载,页数:', mergedPdf.getPageCount());
+
+          let existingMergedPdf = null;
+          let foundPreviewPdf = false;
+
+          try {
+
+            let iframe = null;
+
+            const previewPanel = document.querySelector('.fixed.top-0.right-0.h-full.z-50');
+            if (previewPanel) {
+              iframe = previewPanel.querySelector('iframe');
+              console.log('🔍 方法1: 在预览面板中查找iframe');
+            }
+
+            if (!iframe) {
+              const iframes = document.querySelectorAll('iframe');
+              for (const frame of iframes) {
+                if (frame.src && frame.src.startsWith('blob:')) {
+                  iframe = frame;
+                  console.log('🔍 方法2: 找到blob URL的iframe');
+                  break;
+                }
+              }
+            }
+
+            if (iframe && iframe.src && iframe.src.startsWith('blob:')) {
+              console.log('🔍 发现预览窗口中的PDF:', iframe.src);
+
+              const response = await fetch(iframe.src);
+              const existingPdfBytes = await response.arrayBuffer();
+              existingMergedPdf = await PDFDocument.load(existingPdfBytes);
+              foundPreviewPdf = true;
+              console.log('✅ 成功加载预览窗口中的PDF,页数:', existingMergedPdf.getPageCount());
+            } else {
+              console.log('⚠️ 未找到预览窗口中的PDF iframe');
+            }
+          } catch (error) {
+            console.log('⚠️ 无法从预览窗口获取PDF:', error.message);
+          }
+
+          if (existingMergedPdf && foundPreviewPdf) {
+            console.log('📄 将预览PDF的 ' + existingMergedPdf.getPageCount() + ' 页添加到报销单后面');
+            const pages = await mergedPdf.copyPages(existingMergedPdf, existingMergedPdf.getPageIndices());
+            pages.forEach(page => {
+              mergedPdf.addPage(page);
+            });
+            console.log('✅ 合并完成,总页数:', mergedPdf.getPageCount());
+          } else {
+
+            console.log('📦 从缓存获取发票文件');
+            const invoicePdfs = await getInvoicePdfFiles(invoiceData);
+
+            if (invoicePdfs.length === 0) {
+              console.warn('⚠️ 没有找到发票文件');
+
+              const pdfBytes = await mergedPdf.save();
+              const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+
+              window.__currentExpenseReportBlob = blob;
+
+              showPdfInPreviewOnly(blob);
+              return;
+            }
+
+            for (let i = 0; i < invoicePdfs.length; i++) {
+              try {
+                const invoicePdfBytes = invoicePdfs[i];
+                const invoicePdf = await PDFDocument.load(invoicePdfBytes);
+                const pages = await mergedPdf.copyPages(invoicePdf, invoicePdf.getPageIndices());
+
+                pages.forEach(page => {
+                  mergedPdf.addPage(page);
+                });
+                console.log(`✅ 添加发票 ${i + 1}/${invoicePdfs.length},页数: ${invoicePdf.getPageCount()}`);
+              } catch (error) {
+                console.error(`❌ 添加发票 ${i + 1} 失败:`, error);
+              }
+            }
+            console.log('✅ 从缓存合并完成,总页数:', mergedPdf.getPageCount());
+          }
+
+          const mergedPdfBytes = await mergedPdf.save();
+          const blob = new Blob([mergedPdfBytes], { type: 'application/pdf' });
+
+          console.log('✅ PDF合并完成,总页数:', mergedPdf.getPageCount());
+
+          window.__currentExpenseReportBlob = blob;
+
+          showPdfInPreviewOnly(blob);
+
+        } catch (error) {
+          console.error('❌ PDF合并失败:', error);
+          throw error;
+        }
+      }
+
+      async function _legacyDeleteExpenseReport() {
+        try {
+          console.log('🗑️ [legacy] 删除报销单,恢复原始发票预览...');
+
+          if (window.__currentExpenseReportBlob) {
+            URL.revokeObjectURL(window.__currentExpenseReportBlob);
+            window.__currentExpenseReportBlob = null;
+          }
+
+          const data = await getInvoiceDataFromApp();
+          const invoiceData = Array.isArray(data) ? data : (data.invoices || []);
+
+          if (!invoiceData || invoiceData.length === 0) {
+            console.log('⚠️ 没有发票数据,关闭预览窗口');
+
+            const previewPanel = document.querySelector('.fixed.top-0.right-0.h-full.z-50');
+            if (previewPanel) {
+              previewPanel.classList.add('translate-x-full', 'opacity-0');
+              previewPanel.classList.remove('translate-x-0', 'opacity-100');
+            }
+            showSuccessNotification('✅ 报销单已删除');
+            return;
+          }
+
+          console.log('📦 重新合并原始发票...');
+          const invoicePdfs = await getInvoicePdfFiles(invoiceData);
+
+          if (invoicePdfs.length === 0) {
+            console.warn('⚠️ 没有找到发票文件');
+            showSuccessNotification('✅ 报销单已删除');
+            return;
+          }
+
+          const { PDFDocument } = PDFLib;
+          const mergedPdf = await PDFDocument.create();
+
+          for (let i = 0; i < invoicePdfs.length; i++) {
+            try {
+              const invoicePdfBytes = invoicePdfs[i];
+              const invoicePdf = await PDFDocument.load(invoicePdfBytes);
+              const pages = await mergedPdf.copyPages(invoicePdf, invoicePdf.getPageIndices());
+              pages.forEach(page => {
+                mergedPdf.addPage(page);
+              });
+              console.log(`✅ 恢复发票 ${i + 1}/${invoicePdfs.length}`);
+            } catch (error) {
+              console.error(`❌ 恢复发票 ${i + 1} 失败:`, error);
+            }
+          }
+
+          const mergedPdfBytes = await mergedPdf.save();
+          const blob = new Blob([mergedPdfBytes], { type: 'application/pdf' });
+
+          console.log('✅ 原始发票已恢复,总页数:', mergedPdf.getPageCount());
+
+          showPdfInPreviewOnly(blob);
+
+          showSuccessNotification('✅ 报销单已删除,已恢复原始发票预览');
+        } catch (error) {
+          console.error('❌ 删除报销单失败:', error);
+          alert('❌ 删除报销单失败: ' + error.message);
+        }
+      }
+
+      window.deleteExpenseReport = deleteExpenseReport;
+
+      function _legacyShowPdfInPreviewOnly(pdfBlob) {
+        try {
+          console.log('📺 [legacy] 更新预览窗口显示合并后的PDF');
+
+          const blobUrl = URL.createObjectURL(pdfBlob);
+
+          const previewPanel = document.querySelector('.fixed.top-0.right-0.h-full.z-50');
+          if (!previewPanel) {
+
+            console.warn('未找到预览面板,回退到下载');
+            downloadPdf(pdfBlob, `报销单_${new Date().getTime()}.pdf`);
+            return;
+          }
+
+          previewPanel.classList.remove('translate-x-full', 'opacity-0');
+          previewPanel.classList.add('translate-x-0', 'opacity-100');
+
+          window.__mergedPdfBlobUrl = blobUrl;
+
+          const updateIframe = () => {
+            const iframe = previewPanel.querySelector('iframe');
+            if (iframe && iframe.src !== blobUrl) {
+              console.log('✅ 更新iframe src:', blobUrl);
+              iframe.src = blobUrl;
+              return true;
+            }
+            return false;
+          };
+
+          setTimeout(() => updateIframe(), 100);
+
+          let updateCount = 0;
+          const intervalId = setInterval(() => {
+            updateCount++;
+            if (updateCount > 10) {
+              clearInterval(intervalId);
+              console.log('⏹️ 停止监听iframe更新(已尝试10次)');
+              return;
+            }
+
+            if (updateIframe()) {
+              console.log(`✅ 第${updateCount}次更新成功`);
+            }
+          }, 500);
+
+          setTimeout(() => {
+            clearInterval(intervalId);
+          }, 5000);
+
+        } catch (error) {
+          console.error('❌ 在预览窗口显示报销单失败:', error);
+
+          downloadPdf(pdfBlob, `报销单_${new Date().getTime()}.pdf`);
+        }
+      }
+
+      function showPdfInPreview(pdfBytes) {
+        try {
+
+          const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+          const fileName = `报销单_${new Date().getTime()}.pdf`;
+          const file = new File([blob], fileName, { type: 'application/pdf' });
+
+          if (window.__fileDebugCache) {
+
+            const tempCache = new Map();
+            tempCache.set(fileName, file);
+
+            for (const [key, value] of window.__fileDebugCache.entries()) {
+              tempCache.set(key, value);
+            }
+
+            window.__fileDebugCache = tempCache;
+
+          }
+
+          const fileInput = document.querySelector('input[type="file"]');
+          if (fileInput) {
+
+            const dataTransfer = new DataTransfer();
+            dataTransfer.items.add(file);
+
+            const changeEvent = new Event('change', { bubbles: true });
+            Object.defineProperty(changeEvent, 'target', {
+              writable: false,
+              value: { files: dataTransfer.files }
+            });
+
+            fileInput.dispatchEvent(changeEvent);
+
+          }
+
+          const addFileEvent = new CustomEvent('addExpenseReport', {
+            detail: { file, fileName, blob }
+          });
+          document.dispatchEvent(addFileEvent);
+
+        } catch (error) {
+          console.error('❌ 添加报销单到预览失败:', error);
+
+          downloadPdf(pdfBytes, `报销单_${new Date().getTime()}.pdf`);
+        }
+      }
+
+      async function _legacyGetInvoicePdfFiles(invoiceData) {
+        const pdfFiles = [];
+
+        if (window.__fileDebugCache && window.__fileDebugCache.size > 0) {
+          console.log('📦 [legacy] 从缓存中获取PDF文件,缓存大小:', window.__fileDebugCache.size);
+
+          for (const [fileName, file] of window.__fileDebugCache.entries()) {
+            console.log('检查文件:', fileName);
+
+            if (fileName.toLowerCase().endsWith('.pdf') &&
+              !fileName.includes('_副本') &&
+              !/^报销单[_-]|^报销单\.pdf$/i.test(fileName) &&
+              !fileName.startsWith('000_')) {
+              try {
+                const arrayBuffer = await file.arrayBuffer();
+                pdfFiles.push(arrayBuffer);
+                console.log('✅ 成功加载:', fileName);
+              } catch (error) {
+                console.error(`❌ 加载失败: ${fileName}`, error);
+              }
+            } else {
+              console.log('⏭️ 跳过文件:', fileName);
+            }
+          }
+        } else {
+          console.warn('⚠️ 文件缓存为空或不存在');
+        }
+        console.log(`📊 共获取 ${pdfFiles.length} 个发票PDF文件`);
+        return pdfFiles;
+      }
+
+      function _legacyAddExpenseReportCard() {
+        const existingCards = document.querySelectorAll('.expense-report-operations-card');
+        existingCards.forEach(card => {
+          console.log('🗑️ 移除已存在的报销单卡片');
+          card.remove();
+        });
+
+        const statsCards = document.querySelectorAll('[data-slot="card"]');
+        let statsCard = null;
+
+        for (const card of statsCards) {
+          const cardText = card.textContent || '';
+          if (cardText.includes('发票数量') || cardText.includes('总金额')) {
+            statsCard = card;
+            break;
+          }
+        }
+
+        if (!statsCard) {
+          console.log('⚠️ 未找到发票统计卡片');
+          return;
+        }
+
+        const reportCard = document.createElement('div');
+        reportCard.className = 'expense-report-operations-card';
+        reportCard.setAttribute('data-slot', 'card');
+        reportCard.style.cssText = `
+          background: white;
+          border-radius: 12px;
+          border: 1px solid #e5e7eb;
+          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+          padding: 24px;
+          margin-top: 24px;
+          display: flex;
+          flex-direction: column;
+          gap: 24px;
+        `;
+
+        const header = document.createElement('div');
+        header.setAttribute('data-slot', 'card-header');
+        header.style.cssText = 'padding: 0;';
+
+        const title = document.createElement('div');
+        title.setAttribute('data-slot', 'card-title');
+        title.style.cssText = 'font-weight: 600; font-size: 1rem; line-height: 1;';
+        title.textContent = '📋 报销单操作';
+
+        header.appendChild(title);
+
+        const content = document.createElement('div');
+        content.setAttribute('data-slot', 'card-content');
+        content.style.cssText = 'padding: 0;';
+
+        const buttonContainer = document.createElement('div');
+        buttonContainer.style.cssText = 'display: flex; gap: 12px;';
+
+        const generateBtn = document.createElement('button');
+        generateBtn.textContent = '📋 自动生成报销单';
+        generateBtn.style.cssText = `
+          flex: 1;
+          padding: 11px 16px;
+          background: #4338ca;
+          color: white;
+          border: none;
+          border-radius: 10px;
+          font-size: 14px;
+          font-weight: 600;
+          cursor: pointer;
+          box-shadow: 0 6px 16px rgba(67, 56, 202, 0.22);
+          transition: all 0.25s cubic-bezier(0.32, 0.72, 0, 1);
+        `;
+
+        generateBtn.addEventListener('mouseenter', () => {
+          generateBtn.style.background = '#3730a3';
+          generateBtn.style.boxShadow = '0 8px 22px rgba(67, 56, 202, 0.30)';
+          generateBtn.style.transform = 'translateY(-1px)';
+        });
+
+        generateBtn.addEventListener('mouseleave', () => {
+          generateBtn.style.background = '#4338ca';
+          generateBtn.style.boxShadow = '0 6px 16px rgba(67, 56, 202, 0.22)';
+          generateBtn.style.transform = 'translateY(0)';
+        });
+
+        generateBtn.addEventListener('click', () => {
+          if (window.generateExpenseReport) {
+            window.generateExpenseReport();
+          }
+        });
+
+        const deleteBtn = document.createElement('button');
+        deleteBtn.textContent = '🗑️ 删除报销单';
+        deleteBtn.style.cssText = `
+          flex: 1;
+          padding: 10px 16px;
+          background: white;
+          color: rgb(220, 38, 38);
+          border: 1px solid rgb(252, 165, 165);
+          border-radius: 6px;
+          font-size: 14px;
+          font-weight: 500;
+          cursor: pointer;
+          transition: all 0.2s;
+        `;
+
+        deleteBtn.addEventListener('mouseenter', () => {
+          deleteBtn.style.background = 'rgb(254, 242, 242)';
+        });
+
+        deleteBtn.addEventListener('mouseleave', () => {
+          deleteBtn.style.background = 'white';
+        });
+
+        deleteBtn.addEventListener('click', () => {
+          if (window.deleteExpenseReport) {
+            window.deleteExpenseReport();
+          }
+        });
+
+        const manualBtn2 = document.createElement('button');
+        manualBtn2.textContent = '✏️ 手动确认生成报销单';
+        manualBtn2.style.cssText = `
+          flex: 1;
+          padding: 11px 16px;
+          background: #eef0f6;
+          color: #3730a3;
+          border: none;
+          border-radius: 10px;
+          font-size: 14px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.25s cubic-bezier(0.32, 0.72, 0, 1);
+        `;
+
+        manualBtn2.addEventListener('mouseenter', () => {
+          manualBtn2.style.background = '#e4e7f2';
+          manualBtn2.style.transform = 'translateY(-1px)';
+        });
+
+        manualBtn2.addEventListener('mouseleave', () => {
+          manualBtn2.style.background = '#eef0f6';
+          manualBtn2.style.transform = 'translateY(0)';
+        });
+
+        manualBtn2.addEventListener('click', () => {
+          if (window.generateExpenseReportManual) {
+            window.generateExpenseReportManual();
+          }
+        });
+
+        buttonContainer.appendChild(generateBtn);
+        buttonContainer.appendChild(manualBtn2);
+        buttonContainer.appendChild(deleteBtn);
+        content.appendChild(buttonContainer);
+
+        reportCard.appendChild(header);
+        reportCard.appendChild(content);
+
+        statsCard.parentElement.insertBefore(reportCard, statsCard.nextSibling);
+        console.log('✅ 报销单操作卡片已添加');
+      }
+
+    })();
+  </script>
+  <link rel="preload" href="static/font/geist-sans-latin.woff2" as="font" crossorigin="" type="font/woff2" />
+  <link rel="preload" href="static/font/geist-mono-latin.woff2" as="font" crossorigin="" type="font/woff2" />
+  <link rel="stylesheet" href="static/css/fonts.css" crossorigin="anonymous" />
+  <link rel="stylesheet" href="static/css/tailwind.css" crossorigin="anonymous" />
+  <link rel="stylesheet" href="static/css/react-pdf.css" crossorigin="anonymous" />
+  <link rel="preload" as="script" fetchpriority="low" href="static/js/webpack-runtime.js" crossorigin="" />
+  <script src="static/js/react-dom.js" async="" crossorigin=""></script>
+  <script src="static/js/nextjs-router.js" async="" crossorigin=""></script>
+  <script src="static/js/app-bootstrap.js" async="" crossorigin=""></script>
+  <script src="static/js/countly-analytics.js" async="" crossorigin=""></script>
+  <script src="static/js/pdfjs-lib.js?v=3" async="" crossorigin=""></script>
+  <script src="static/js/framer-motion.js" async="" crossorigin=""></script>
+  <script src="static/js/ua-parser.js" async="" crossorigin=""></script>
+  <script src="static/js/routing-utils.js" async="" crossorigin=""></script>
+  <script src="static/js/dialog-scroll-lock.js" async="" crossorigin=""></script>
+  <script src="static/js/dnd-kit-sortable.js" async="" crossorigin=""></script>
+  <script src="static/js/alert-dialog.js" async="" crossorigin=""></script>
+  <script src="static/js/invoice-tool-ui.js?v=2" async="" crossorigin=""></script>
+  <script src="static/js/page-entry-invoice.js" async="" crossorigin=""></script>
+  <script src="static/js/shared-ui-primitives.js" async="" crossorigin=""></script>
+  <script src="static/js/root-layout.js" async="" crossorigin=""></script>
+  <script src="static/js/not-found-page.js" async="" crossorigin=""></script>
+  <meta name="next-size-adjust" content="" />
+  <meta name="robots" content="index, follow, max-snippet:-1, max-image-preview:large, max-video-preview:-1">
+  <meta name="theme-color" content="#4338ca">
+  <link rel="canonical" href="https://lcofo.cn/main.html">
+  <title>发票打印助手 - 在线PDF合并打印 | 电子发票处理工具</title>
+
+  
+  <meta property="og:site_name" content="发票打印助手">
+  <meta property="og:url" content="https://lcofo.cn/main.html">
+  <meta property="og:image" content="https://lcofo.cn/apple-icon.png">
+  <meta property="og:image:width" content="500">
+  <meta property="og:image:height" content="500">
+  <meta name="twitter:image" content="https://lcofo.cn/apple-icon.png">
+
+  
+  <script type="application/ld+json">
+    {
+      "@context": "https://schema.org",
+      "@type": "WebApplication",
+      "name": "发票打印助手",
+      "description": "专业的电子发票处理解决方案，支持批量合并、自动统计、一键打印。让报销更简单，让财务更轻松。免费在线使用，无需注册。",
+      "url": "https://lcofo.cn",
+      "applicationCategory": "BusinessApplication",
+      "operatingSystem": "Web Browser",
+      "offers": {
+        "@type": "Offer",
+        "price": "0",
+        "priceCurrency": "CNY"
+      },
+      "creator": {
+        "@type": "Organization",
+        "name": "发票打印助手"
+      },
+      "featureList": [
+        "电子发票批量合并",
+        "自动统计发票信息",
+        "一键打印功能",
+        "PDF文件处理",
+        "CSV数据导出"
+      ]
+    }
+    </script>
+
+  <meta name="description" content="在线电子发票合并打印工具：拖入多张 PDF 发票，自动排进 A4 版面，一次打印全部输出，自动统计金额、一键生成报销单。全程浏览器本地处理不上传，免费即开即用，无需注册下载。" />
+  <meta name="author" content="发票打印助手" />
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="keywords"
+    content="电子发票合并,在线发票合并,PDF发票合并打印,发票批量打印,多张发票合并打印,发票合并成一个PDF,电子发票批量处理,发票A4排版,报销单生成,发票金额统计,发票打印工具,在线PDF合并,免费发票合并,发票处理工具" />
+  <meta name="creator" content="发票打印助手" />
+  <meta name="publisher" content="发票打印助手" />
+  <meta name="apple-mobile-web-app-title" content="发票打印助手" />
+  <meta property="og:title" content="发票打印助手 - 在线批量合并电子发票，一次打印全部输出" />
+  <meta property="og:description" content="拖入多张 PDF 发票自动排进 A4 版面，一次打印全部输出，自动统计金额、一键生成报销单。本地处理不上传，免费在线使用。" />
+  <meta property="og:locale" content="zh_CN" />
+  <meta property="og:type" content="website" />
+  <meta name="twitter:card" content="summary" />
+  <meta name="twitter:title" content="发票打印助手 - 在线批量合并电子发票" />
+  <meta name="twitter:description" content="拖入多张 PDF 发票自动排进 A4 版面，一次打印全部输出，自动统计金额、一键生成报销单。本地处理不上传，免费在线使用。" />
+  <link rel="icon" href="favicon.ico" type="image/x-icon" sizes="48x48" />
+  <link rel="icon" href="icon0.svg" type="image/svg+xml" sizes="any" />
+  <link rel="icon" href="icon1.png" type="image/png" sizes="96x96" />
+  <link rel="apple-touch-icon" href="apple-icon.png" type="image/png" sizes="180x180" />
+  <script>
+    document
+      .querySelectorAll(
+        'body link[rel="icon"], body link[rel="apple-touch-icon"]',
+      )
+      .forEach((el) => document.head.appendChild(el));
+  </script>
+  <script src="static/js/polyfills.js" crossorigin="anonymous" nomodule=""></script>
+  
+  <style id="logo-title-styles">
+    /* [removed] GitHub Star button + top visitor stats (cache / re-injection guard) */
+    #github-float-custom,
+    #ad-root {
+      display: none !important;
+    }
+
+
+    body::before {
+      content: '';
+      position: fixed;
+      top: -40%;
+      left: -30%;
+      width: 180%;
+      height: 180%;
+      background:
+        radial-gradient(closest-side at 22% 18%, rgba(67, 56, 202, 0.10), transparent 70%),
+        radial-gradient(closest-side at 82% 78%, rgba(67, 56, 202, 0.06), transparent 70%);
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    body::after {
+      content: '';
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      background-image:
+        linear-gradient(rgba(30, 35, 48, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(30, 35, 48, 0.03) 1px, transparent 1px);
+      background-size: 64px 64px;
+      opacity: 0.6;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    body>* {
+      position: relative;
+      z-index: 1;
+    }
+
+    @keyframes gradient-bg {
+      0% {
+        background-position: 0% 50%;
+      }
+
+      50% {
+        background-position: 100% 50%;
+      }
+
+      100% {
+        background-position: 0% 50%;
+      }
+    }
+
+    @keyframes float {
+
+      0%,
+      100% {
+        transform: translateY(0px);
+      }
+
+      50% {
+        transform: translateY(-20px);
+      }
+    }
+
+    @keyframes particle {
+
+      0%,
+      100% {
+        transform: translateY(0) translateX(0);
+        opacity: 0;
+      }
+
+      10% {
+        opacity: 1;
+      }
+
+      90% {
+        opacity: 1;
+      }
+
+      100% {
+        transform: translateY(-100vh) translateX(50px);
+        opacity: 0;
+      }
+    }
+
+    @keyframes scan {
+      0% {
+        transform: translateY(-100%);
+      }
+
+      100% {
+        transform: translateY(100vh);
+      }
+    }
+
+    .particle {
+      position: fixed;
+      width: 2px;
+      height: 2px;
+      background: rgba(67, 56, 202, 0.22);
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+      animation: particle 22s linear infinite;
+    }
+
+    .scan-line {
+      display: none;
+    }
+
+    .floating-shape {
+      position: fixed;
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+      animation: float 8s ease-in-out infinite;
+      filter: blur(40px);
+    }
+
+    .min-h-screen.bg-blue-50.bg-gradient-to-br {
+      background: #f7f8fa !important;
+      position: relative !important;
+      overflow: visible !important;
+    }
+
+    .min-h-screen.bg-blue-50.bg-gradient-to-br::before {
+      content: '' !important;
+      position: fixed !important;
+      top: -40% !important;
+      left: -30% !important;
+      width: 180% !important;
+      height: 180% !important;
+      background:
+        radial-gradient(closest-side at 20% 15%, rgba(67, 56, 202, 0.09), transparent 70%),
+        radial-gradient(closest-side at 85% 80%, rgba(67, 56, 202, 0.05), transparent 70%) !important;
+      pointer-events: none !important;
+      z-index: -2 !important;
+    }
+
+    .min-h-screen.bg-blue-50.bg-gradient-to-br::after {
+      content: '' !important;
+      position: fixed !important;
+      top: 0 !important;
+      left: 0 !important;
+      right: 0 !important;
+      bottom: 0 !important;
+      background-image:
+        linear-gradient(rgba(30, 35, 48, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(30, 35, 48, 0.03) 1px, transparent 1px) !important;
+      background-size: 64px 64px !important;
+      opacity: 0.5 !important;
+      pointer-events: none !important;
+      z-index: -1 !important;
+    }
+
+    .min-h-screen.bg-blue-50.bg-gradient-to-br>* {
+      position: relative !important;
+      z-index: 1 !important;
+    }
+
+    /* [已移除] 顶部旧入口按钮：连同 React hydration 后可能重新注入的版本一起隐藏 */
+    a:has(.home-btn-text),
+    button:has(.home-btn-text),
+    .home-btn-text {
+      display: none !important;
+    }
+
+    .home-btn-text,
+    span.home-btn-text {
+      font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif !important;
+      font-size: 0.95rem !important;
+      font-weight: 500 !important;
+      letter-spacing: 0.02em !important;
+      color: #4338ca !important;
+      text-rendering: optimizeLegibility !important;
+      -webkit-font-smoothing: antialiased !important;
+      -moz-osx-font-smoothing: grayscale !important;
+    }
+
+    header span.font-bold.text-xl,
+    header .font-bold.text-xl,
+    header a span.font-bold,
+    header a span.text-xl,
+    [role="banner"] span.font-bold.text-xl,
+    [role="banner"] .font-bold.text-xl,
+    .logo-title,
+    header .logo-title,
+    [role="banner"] .logo-title {
+      font-family: 'Microsoft YaHei', 'PingFang SC', -apple-system, BlinkMacSystemFont, sans-serif !important;
+      font-size: 1.5rem !important;
+      font-weight: 600 !important;
+      letter-spacing: -0.01em !important;
+      color: #1e2330 !important;
+      text-rendering: optimizeLegibility !important;
+      -webkit-font-smoothing: antialiased !important;
+      -moz-osx-font-smoothing: grayscale !important;
+      position: relative !important;
+      display: inline-block !important;
+      padding: 0.5rem 1rem !important;
+      border-radius: 12px !important;
+      transition: all 0.3s cubic-bezier(0.32, 0.72, 0, 1) !important;
+    }
+
+    header span.font-bold.text-xl:hover,
+    header .font-bold.text-xl:hover,
+    [role="banner"] span.font-bold.text-xl:hover,
+    .logo-title:hover,
+    header .logo-title:hover,
+    [role="banner"] .logo-title:hover {
+      transform: translateY(-1px) !important;
+      filter: brightness(1.2) !important;
+    }
+
+    header span.font-bold.text-xl::before,
+    header .font-bold.text-xl::before,
+    [role="banner"] span.font-bold.text-xl::before,
+    .logo-title::before,
+    header .logo-title::before,
+    [role="banner"] .logo-title::before {
+      content: '' !important;
+      position: absolute !important;
+      inset: 0 !important;
+      border-radius: 12px !important;
+      background: rgba(102, 126, 234, 0.05) !important;
+      backdrop-filter: blur(10px) !important;
+      border: 1px solid rgba(102, 126, 234, 0.2) !important;
+      z-index: -1 !important;
+      opacity: 0 !important;
+      transition: opacity 0.3s ease !important;
+    }
+
+    header span.font-bold.text-xl:hover::before,
+    header .font-bold.text-xl:hover::before,
+    [role="banner"] span.font-bold.text-xl:hover::before,
+    .logo-title:hover::before,
+    header .logo-title:hover::before,
+    [role="banner"] .logo-title:hover::before {
+      opacity: 1 !important;
+    }
+
+    [data-slot="card-title"].leading-none.font-semibold,
+    div[data-slot="card-title"] {
+      font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif !important;
+      font-size: 1.1rem !important;
+      font-weight: 600 !important;
+      letter-spacing: 0.08em !important;
+    }
+
+    [data-slot="card-title"] {
+      color: #1e2330 !important;
+      -webkit-text-fill-color: #1e2330 !important;
+      text-rendering: optimizeLegibility !important;
+      -webkit-font-smoothing: antialiased !important;
+      -moz-osx-font-smoothing: grayscale !important;
+    }
+
+    [data-slot="card-title"] svg {
+      -webkit-text-fill-color: #4338ca !important;
+      color: #4338ca !important;
+      fill: none !important;
+      stroke: currentColor !important;
+      background: transparent !important;
+      -webkit-background-clip: border-box !important;
+      background-clip: border-box !important;
+      animation: none !important;
+    }
+
+    [data-slot="card-title"] svg path,
+    [data-slot="card-title"] svg rect,
+    [data-slot="card-title"] svg circle {
+      stroke: #4338ca !important;
+    }
+
+    [data-slot="card-title"]>*:not(svg) {
+      background: inherit !important;
+      -webkit-background-clip: inherit !important;
+      background-clip: inherit !important;
+      -webkit-text-fill-color: inherit !important;
+    }
+
+    [data-slot="card-title"] span:not([class*="sr-only"]),
+    [data-slot="card-title"] button {
+      background: inherit !important;
+      -webkit-background-clip: inherit !important;
+      background-clip: inherit !important;
+      -webkit-text-fill-color: inherit !important;
+    }
+
+    [data-slot="card-title"] button span,
+    [data-slot="card-title"] button,
+    [data-slot="card-header"] button span,
+    [data-slot="card-header"] button {
+      font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif !important;
+      letter-spacing: 0.06em !important;
+      color: #3730a3 !important;
+      -webkit-text-fill-color: #3730a3 !important;
+      text-rendering: optimizeLegibility !important;
+      -webkit-font-smoothing: antialiased !important;
+    }
+
+    [data-slot="card-title"] .text-xs,
+    [data-slot="card-title"] .text-sm,
+    [data-slot="card-title"] span.text-xs,
+    [data-slot="card-title"] span.text-sm {
+      color: #6b7280 !important;
+      -webkit-text-fill-color: #6b7280 !important;
+    }
+
+    [data-slot="card-title"] button svg,
+    [data-slot="card-header"] button svg {
+      -webkit-text-fill-color: #4338ca !important;
+      color: #4338ca !important;
+      background: transparent !important;
+      -webkit-background-clip: border-box !important;
+      background-clip: border-box !important;
+      animation: none !important;
+    }
+
+    article h3.text-lg.font-semibold.text-gray-800,
+    article .text-lg.font-semibold.text-gray-800 {
+      font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif !important;
+      font-size: 1.25rem !important;
+      font-weight: 600 !important;
+      letter-spacing: 0.04em !important;
+      color: #1e2330 !important;
+      -webkit-text-fill-color: #1e2330 !important;
+      text-rendering: optimizeLegibility !important;
+      -webkit-font-smoothing: antialiased !important;
+      -moz-osx-font-smoothing: grayscale !important;
+      position: relative !important;
+      display: inline-block !important;
+      padding: 0.25rem 0.5rem !important;
+      border-radius: 8px !important;
+      transition: all 0.4s cubic-bezier(0.32, 0.72, 0, 1) !important;
+    }
+
+    article h3.text-lg.font-semibold.text-gray-800:hover,
+    article .text-lg.font-semibold.text-gray-800:hover {
+      transform: translateY(-1px) !important;
+      color: #4338ca !important;
+      -webkit-text-fill-color: #4338ca !important;
+    }
+
+    article h3.text-lg.font-semibold.text-gray-800::before,
+    article .text-lg.font-semibold.text-gray-800::before {
+      content: '' !important;
+      position: absolute !important;
+      inset: 0 !important;
+      border-radius: 8px !important;
+      background: rgba(67, 56, 202, 0.06) !important;
+      border: 1px solid rgba(67, 56, 202, 0.14) !important;
+      z-index: -1 !important;
+      opacity: 0 !important;
+      transition: opacity 0.4s cubic-bezier(0.32, 0.72, 0, 1) !important;
+    }
+
+    article h3.text-lg.font-semibold.text-gray-800:hover::before,
+    article .text-lg.font-semibold.text-gray-800:hover::before {
+      opacity: 1 !important;
+    }
+
+    .feedback-container {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 0;
+      z-index: 1000;
+      display: flex;
+      flex-direction: row;
+      align-items: flex-end;
+      gap: 0;
+    }
+
+    .fab {
+      width: 56px;
+      height: 56px;
+      border-radius: 12px;
+      background: white;
+      color: #4b5563;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 0.25rem;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      border: 1px solid #e5e7eb;
+      margin-right: 0.75rem;
+    }
+
+    .fab:hover {
+      background: #f9fafb;
+      color: #1f2937;
+      transform: translateY(-2px);
+      box-shadow: 0 6px 16px rgba(0, 0, 0, 0.15);
+    }
+
+    .fab svg {
+      width: 24px;
+      height: 24px;
+    }
+
+    .fab-text,
+    .fab .fab-text,
+    button.fab .fab-text,
+    button.fab span.fab-text {
+      font-size: 0.75rem !important;
+      font-weight: 500 !important;
+      font-family: 'Microsoft YaHei', 'PingFang SC', sans-serif !important;
+      letter-spacing: 0.06em !important;
+      color: #4338ca !important;
+      -webkit-text-fill-color: #4338ca !important;
+      text-rendering: optimizeLegibility !important;
+      -webkit-font-smoothing: antialiased !important;
+      -moz-osx-font-smoothing: grayscale !important;
+    }
+
+    .fab svg,
+    button.fab svg {
+      -webkit-text-fill-color: currentColor !important;
+      color: currentColor !important;
+      background: transparent !important;
+      -webkit-background-clip: border-box !important;
+      background-clip: border-box !important;
+      animation: none !important;
+    }
+
+    .feedback-popup {
+      position: relative;
+      width: 280px;
+      margin-right: 0.75rem;
+      opacity: 0;
+      pointer-events: none;
+      transform: translateX(40px);
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    }
+
+    .feedback-popup.show {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateX(0);
+    }
+
+    .feedback-content {
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+      border: 1px solid #e5e7eb;
+      overflow: hidden;
+    }
+
+    .feedback-body {
+      padding: 1.5rem;
+      text-align: center;
+    }
+
+    .feedback-qr {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .feedback-qr img {
+      border-radius: 8px;
+      border: 1px solid #e5e7eb;
+      margin-bottom: 0.5rem;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+    }
+
+    .feedback-title {
+      font-weight: 600;
+      color: #1f2937;
+      font-size: 0.875rem;
+    }
+
+    .feedback-desc {
+      font-size: 0.75rem;
+      color: #6b7280;
+      line-height: 1.5;
+    }
+
+    @media (max-width: 768px) {
+      .feedback-popup {
+        width: 260px;
+      }
+
+      .feedback-body {
+        padding: 1rem;
+      }
+
+      .feedback-qr img {
+        width: 100px;
+        height: 100px;
+      }
+    }
+
+    .min-h-screen.bg-blue-50.bg-gradient-to-br {
+      background: #f6f7f9 !important;
+    }
+
+    header.border-b.bg-white {
+      background: rgba(255,255,255,0.82) !important;
+      backdrop-filter: saturate(180%) blur(12px);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      border-bottom-color: #e9ebf1 !important;
+    }
+
+    [data-slot="card"] {
+      border-color: #e9ebf1 !important;
+      border-radius: 16px !important;
+      box-shadow: 0 4px 16px rgba(54,47,158,0.06), 0 1px 3px rgba(26,31,46,0.05) !important;
+      transition: box-shadow 0.4s cubic-bezier(0.32,0.72,0,1), border-color 0.4s cubic-bezier(0.32,0.72,0,1);
+    }
+    [data-slot="card"]:hover {
+      box-shadow: 0 12px 34px rgba(54,47,158,0.1), 0 2px 6px rgba(26,31,46,0.05) !important;
+    }
+
+    [aria-label="点击选择或拖拽上传PDF发票文件"] {
+      border-width: 2px !important;
+      border-color: #d3d6ec !important;
+      border-radius: 12px !important;
+      background: #f4f5fb !important;
+      padding: 2rem 1.5rem !important;
+      transition: all 0.35s cubic-bezier(0.32,0.72,0,1) !important;
+    }
+    [aria-label="点击选择或拖拽上传PDF发票文件"]:hover {
+      border-color: #4338ca !important;
+      background: #ecedf9 !important;
+      transform: translateY(-1px);
+    }
+    [aria-label="点击选择或拖拽上传PDF发票文件"] svg {
+      color: #4338ca !important;
+    }
+
+    section[aria-label="产品功能特色介绍"] > div {
+      max-width: 72rem !important;
+      display: grid !important;
+      grid-template-columns: repeat(5, 1fr) !important;
+      align-items: stretch !important;
+      gap: 14px !important;
+      padding: 22px !important;
+      background: #ffffff !important;
+      border-color: #e9ebf1 !important;
+      border-radius: 18px !important;
+      box-shadow: 0 4px 16px rgba(54,47,158,0.06) !important;
+    }
+    section[aria-label="产品功能特色介绍"] article {
+      max-width: none !important;
+      padding: 16px 14px !important;
+      border-radius: 12px !important;
+      background: #f6f7f9 !important;
+      border: 1px solid #eef0f4 !important;
+      transition: transform 0.4s cubic-bezier(0.32,0.72,0,1), box-shadow 0.4s cubic-bezier(0.32,0.72,0,1);
+    }
+    section[aria-label="产品功能特色介绍"] article:hover {
+      transform: translateY(-3px);
+      box-shadow: 0 10px 26px rgba(54,47,158,0.1);
+    }
+
+    section[aria-label="产品功能特色介绍"] article > div:first-child {
+      flex-direction: column !important;
+      align-items: flex-start !important;
+      gap: 12px !important;
+      margin-bottom: 10px !important;
+    }
+    section[aria-label="产品功能特色介绍"] article svg {
+      color: #4338ca !important;
+      stroke: #4338ca !important;
+      width: 34px !important;
+      height: 34px !important;
+      padding: 6px !important;
+      border-radius: 10px !important;
+      background: #f4f5fb !important;
+      border: 1px solid #e9ebf1 !important;
+      box-sizing: border-box !important;
+    }
+    section[aria-label="产品功能特色介绍"] article h3 {
+      font-size: 1rem !important;
+      font-weight: 700 !important;
+      color: #1a1f2e !important;
+      letter-spacing: -0.01em !important;
+    }
+    section[aria-label="产品功能特色介绍"] article p {
+      color: #565c6b !important;
+      line-height: 1.55 !important;
+    }
+
+    @media (max-width: 900px) {
+      section[aria-label="产品功能特色介绍"] > div { grid-template-columns: repeat(2, 1fr) !important; }
+    }
+    @media (max-width: 520px) {
+      section[aria-label="产品功能特色介绍"] > div { grid-template-columns: 1fr !important; }
+    }
+  </style>
+</head>
+
+<body class="__variable_07ea09 __variable_871795 antialiased">
+  <div class="min-h-screen bg-blue-50 bg-gradient-to-br from-blue-50 to-indigo-100 flex flex-col">
+    <header role="banner">
+      <header class="border-b bg-white">
+        <div class="container mx-auto px-4 h-16 flex items-center justify-between">
+          <a class="flex items-center" href="main.html"><span class="logo-title">发票打印助手</span></a>
+          <!-- [已移除] 顶部旧入口按钮 -->
+          <div class="flex items-center gap-4"></div>
+        </div>
+      </header>
+    </header>
+    <main role="main" class="max-w-7xl w-full mx-auto p-4 flex flex-col flex-1">
+      <div class="flex-1"></div>
+      <section aria-label="发票处理工作区" class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+        <aside class="space-y-6 lg:col-start-2" role="complementary" aria-label="文件管理和统计区域">
+          <div data-slot="card"
+            class="bg-card text-card-foreground flex flex-col gap-6 rounded-xl border py-6 shadow-sm" role="region"
+            aria-label="文件上传区域">
+            <div data-slot="card-header"
+              class="@container/card-header grid auto-rows-min grid-rows-[auto_auto] items-start gap-1.5 px-6 has-data-[slot=card-action]:grid-cols-[1fr_auto] [.border-b]:pb-6">
+              <div data-slot="card-title" class="leading-none font-semibold flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewbox="0 0 24 24" fill="none"
+                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                  class="lucide lucide-upload h-5 w-5" aria-hidden="true">
+                  <path d="M12 3v12"></path>
+                  <path d="m17 8-5-5-5 5"></path>
+                  <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+                </svg>添加发票文件
+              </div>
+            </div>
+            <div data-slot="card-content" class="px-6">
+              <div role="button" tabindex="0"
+                class="border-2 border-dashed rounded-lg p-6 text-center cursor-pointer transition-colors border-gray-300 hover:border-gray-400"
+                aria-label="点击选择或拖拽上传PDF发票文件">
+                <input accept="application/pdf,.pdf" multiple="" type="file" style="
+                      border: 0;
+                      clip: rect(0, 0, 0, 0);
+                      clip-path: inset(50%);
+                      height: 1px;
+                      margin: 0 -1px -1px 0;
+                      overflow: hidden;
+                      padding: 0;
+                      position: absolute;
+                      width: 1px;
+                      white-space: nowrap;
+                    " tabindex="-1" aria-label="选择PDF发票文件" /><svg xmlns="http://www.w3.org/2000/svg" width="24"
+                  height="24" viewbox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                  stroke-linecap="round" stroke-linejoin="round"
+                  class="lucide lucide-file-text h-10 w-10 mx-auto text-gray-400 mb-3" aria-hidden="true">
+                  <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path>
+                  <path d="M14 2v4a2 2 0 0 0 2 2h4"></path>
+                  <path d="M10 9H8"></path>
+                  <path d="M16 13H8"></path>
+                  <path d="M16 17H8"></path>
+                </svg>
+                <div>
+                  <p class="text-base text-gray-600 mb-1">
+                    把发票文件拖进来这里
+                  </p>
+                  <p class="text-sm text-gray-500">
+                    或点击选择文件（支持多选）
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </aside>
+      </section>
+      <div class="flex-1"></div>
+      <section class="mt-8" aria-label="产品功能特色介绍">
+        <div
+          class="w-full max-w-5xl mx-auto py-6 px-4 flex flex-col md:flex-row justify-around items-start gap-6 bg-white rounded-xl shadow-sm border">
+          <article class="flex flex-col max-w-xs">
+            <div class="flex items-center gap-2 mb-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewbox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                class="lucide lucide-printer w-5 h-5 text-orange-600" aria-hidden="true">
+                <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"></path>
+                <path d="M6 9V3a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v6"></path>
+                <rect x="6" y="14" width="12" height="8" rx="1"></rect>
+              </svg>
+              <h3 class="text-lg font-semibold text-gray-800">一键打印</h3>
+            </div>
+            <p class="text-sm text-gray-500">
+              多张发票一键打印，无需单张繁琐提交
+            </p>
+          </article>
+          <article class="flex flex-col max-w-xs">
+            <div class="flex items-center gap-2 mb-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewbox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                class="lucide lucide-layout-template w-5 h-5 text-green-600" aria-hidden="true">
+                <rect width="18" height="7" x="3" y="3" rx="1"></rect>
+                <rect width="9" height="7" x="3" y="14" rx="1"></rect>
+                <rect width="5" height="7" x="16" y="14" rx="1"></rect>
+              </svg>
+              <h3 class="text-lg font-semibold text-gray-800">智能合并</h3>
+            </div>
+            <p class="text-sm text-gray-500">自动合并为A4双联，节省50%纸张</p>
+          </article>
+          <article class="flex flex-col max-w-xs">
+            <div class="flex items-center gap-2 mb-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewbox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                class="lucide lucide-file-spreadsheet w-5 h-5 text-purple-600" aria-hidden="true">
+                <path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"></path>
+                <path d="M14 2v4a2 2 0 0 0 2 2h4"></path>
+                <path d="M8 13h2"></path>
+                <path d="M14 13h2"></path>
+                <path d="M8 17h2"></path>
+                <path d="M14 17h2"></path>
+              </svg>
+              <h3 class="text-lg font-semibold text-gray-800">数据导出</h3>
+            </div>
+            <p class="text-sm text-gray-500">
+              发票信息生成CSV，便于Excel管理
+            </p>
+          </article>
+          <article class="flex flex-col max-w-xs">
+            <div class="flex items-center gap-2 mb-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewbox="0 0 24 24" fill="none"
+                stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                class="lucide lucide-cloud-upload w-5 h-5 text-blue-600" aria-hidden="true">
+                <path d="M12 13v8"></path>
+                <path d="M4 14.899A7 7 0 1 1 15.71 8h1.79a4.5 4.5 0 0 1 2.5 8.242"></path>
+                <path d="m8 17 4-4 4 4"></path>
+              </svg>
+              <h3 class="text-lg font-semibold text-gray-800">批量处理</h3>
+            </div>
+            <p class="text-sm text-gray-500">拖拽或多选文件，一键批量上传</p>
+          </article>
+          <article class="flex flex-col max-w-xs">
+            <div class="flex items-center gap-2 mb-2">
+              <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewbox="0 0 24 24" fill="none"
+                stroke="#db2777" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+                class="lucide lucide-copy w-5 h-5" aria-hidden="true">
+                <rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect>
+                <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path>
+              </svg>
+              <h3 class="text-lg font-semibold text-gray-800">一键复制</h3>
+            </div>
+            <p class="text-sm text-gray-500">复制文件并直接打印，绕过MD5去重限制</p>
+          </article>
+        </div>
+      </section>
+    </main>
+    <div
+      class="fixed top-0 right-0 h-full z-50 bg-white shadow-2xl transition-all duration-300 ease-in-out translate-x-full opacity-0"
+      style="width: 70%; min-width: 400px; max-width: 800px">
+      <div class="w-full h-full flex flex-col"></div>
+    </div>
+  </div>
+  
+
+  
+  <div class="feedback-container">
+    <div class="feedback-popup" id="feedbackPopup">
+      <div class="feedback-content">
+        <div class="feedback-body">
+          <div class="feedback-qr">
+            <img src="static/picture/qywxkf.png" alt="工程师微信二维码" width="128" height="128">
+            <p class="feedback-title">扫码添加微信</p>
+            <p class="feedback-desc">使用功能添加、bug反馈，双向交流无阻碍</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    <button class="fab" id="feedbackBtn" aria-label="联系">
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"></path>
+      </svg>
+      <span class="fab-text">联系</span>
+    </button>
+  </div>
+  <section aria-label="Notifications alt+T" tabindex="-1" aria-live="polite" aria-relevant="additions text"
+    aria-atomic="false"></section>
+  <script src="static/js/webpack-runtime.js" crossorigin="" async=""></script>
+  <script>
+    (self.__next_f = self.__next_f || []).push([0]);
+  </script>
+  <script>
+    self.__next_f.push([
+      1,
+      '1:"$Sreact.fragment"\n3:I[7555,[],""]\n4:I[1295,[],""]\n5:I[894,[],"ClientPageRoot"]\n6:I[1884,["991","static/chunks/countly-analytics.js","84","static/chunks/pdfjs-lib.js","991","static/chunks/countly-analytics.js","69","static/chunks/framer-motion.js","715","static/chunks/ua-parser.js","53","static/chunks/routing-utils.js","822","static/chunks/dialog-scroll-lock.js","945","static/chunks/dnd-kit-sortable.js","788","static/chunks/alert-dialog.js","536","static/chunks/invoice-tool-ui.js","798","static/chunks/app/main/page-entry-invoice.js"],"default"]\n9:I[9665,[],"MetadataBoundary"]\nb:I[9665,[],"OutletBoundary"]\ne:I[4911,[],"AsyncMetadataOutlet"]\n10:I[9665,[],"ViewportBoundary"]\n12:I[6614,[],""]\n:HL["static/font/geist-sans-latin.woff2","font",{"crossOrigin":"","type":"font/woff2"}]\n:HL["static/font/geist-mono-latin.woff2","font",{"crossOrigin":"","type":"font/woff2"}]\n:HL["static/css/fonts.css","style",{"crossOrigin":""}]\n:HL["static/css/tailwind.css","style",{"crossOrigin":""}]\n:HL["static/css/react-pdf.css","style",{"crossOrigin":""}]\n0:{"P":null,"b":"1CB4bMbuDRQJUWY5RPPEz","p":".","c":["","main",""],"i":false,"f":[[["",{"children":["main",{"children":["__PAGE__",{}]}]},"$undefined","$undefined",true],["",["$","$1","c",{"children":[[["$","link","0",{"rel":"stylesheet","href":"static/css/fonts.css","precedence":"next","crossOrigin":"anonymous","nonce":"$undefined"}],["$","link","1",{"rel":"stylesheet","href":"static/css/tailwind.css","precedence":"next","crossOrigin":"anonymous","nonce":"$undefined"}]],"$L2"]}],{"children":["main",["$","$1","c",{"children":[null,["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":"$undefined","forbidden":"$undefined","unauthorized":"$undefined"}]]}],{"children":["__PAGE__",["$","$1","c",{"children":[["$","$L5",null,{"Component":"$6","searchParams":{},"params":{},"promises":["$@7","$@8"]}],["$","$L9",null,{"children":"$La"}],[["$","link","0",{"rel":"stylesheet","href":"static/css/react-pdf.css","precedence":"next","crossOrigin":"anonymous","nonce":"$undefined"}]],["$","$Lb",null,{"children":["$Lc","$Ld",["$","$Le",null,{"promise":"$@f"}]]}]]}],{},null,false]},null,false]},null,false],["$","$1","h",{"children":[null,["$","$1","ma1-EA4rLJ74m1HGEmWyn",{"children":[["$","$L10",null,{"children":"$L11"}],["$","meta",null,{"name":"next-size-adjust","content":""}]]}],null]}],false]],"m":"$undefined","G":["$12","$undefined"],"s":false,"S":true}\n',
+    ]);
+  </script>
+  <script>
+    self.__next_f.push([
+      1,
+      '13:"$Sreact.suspense"\n14:I[4911,[],"AsyncMetadata"]\n7:{}\n8:{}\na:["$","$13",null,{"fallback":null,"children":["$","$L14",null,{"promise":"$@15"}]}]\n',
+    ]);
+  </script>
+  <script>
+    self.__next_f.push([1, "d:null\n"]);
+  </script>
+  <script>
+    self.__next_f.push([
+      1,
+      '17:I[9074,["991","static/chunks/countly-analytics.js","69","static/chunks/framer-motion.js","715","static/chunks/ua-parser.js","822","static/chunks/dialog-scroll-lock.js","49","static/chunks/shared-ui-primitives.js","788","static/chunks/alert-dialog.js","177","static/chunks/app/root-layout.js"],"Toaster"]\n18:I[6485,["991","static/chunks/countly-analytics.js","69","static/chunks/framer-motion.js","715","static/chunks/ua-parser.js","822","static/chunks/dialog-scroll-lock.js","49","static/chunks/shared-ui-primitives.js","788","static/chunks/alert-dialog.js","177","static/chunks/app/root-layout.js"],"StagewiseToolbar"]\n19:I[8865,["991","static/chunks/countly-analytics.js","69","static/chunks/framer-motion.js","715","static/chunks/ua-parser.js","822","static/chunks/dialog-scroll-lock.js","49","static/chunks/shared-ui-primitives.js","788","static/chunks/alert-dialog.js","177","static/chunks/app/root-layout.js"],"ReactPlugin"]\n2:["$","html",null,{"lang":"zh","children":["$","body",null,{"className":"__variable_07ea09 __variable_871795 antialiased","children":["$L16",["$","$L17",null,{"richColors":true,"expand":true}],["$","$L18",null,{"config":{"plugins":["$19"]}}]]}]}]\n',
+    ]);
+  </script>
+  <script>
+    self.__next_f.push([
+      1,
+      '1a:I[6096,["991","static/chunks/countly-analytics.js","69","static/chunks/framer-motion.js","715","static/chunks/ua-parser.js","822","static/chunks/dialog-scroll-lock.js","49","static/chunks/shared-ui-primitives.js","788","static/chunks/alert-dialog.js","177","static/chunks/app/root-layout.js"],"default"]\n1b:I[9543,["991","static/chunks/countly-analytics.js","69","static/chunks/framer-motion.js","53","static/chunks/routing-utils.js","345","static/chunks/app/not-found-page.js"],"default"]\n1c:I[951,["991","static/chunks/countly-analytics.js","69","static/chunks/framer-motion.js","715","static/chunks/ua-parser.js","822","static/chunks/dialog-scroll-lock.js","49","static/chunks/shared-ui-primitives.js","788","static/chunks/alert-dialog.js","177","static/chunks/app/root-layout.js"],"Initializer"]\n11:[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}]]\n',
+    ]);
+  </script>
+  <script>
+    self.__next_f.push([
+      1,
+      '16:["$","$L1a",null,{"formats":"$undefined","locale":"zh","messages":{"Common":{"name":"发票打印助手","longName":"发票打印助手","slogan":"让报销更简单，让财务更轻松","backToHome":"返回首页","confirm":"确定","cancel":"取消","close":"关闭","iKnow":"知道了","dontShowAgain":"不再显示","clear":"清空","delete":"删除","download":"下载","upload":"上传","processing":"处理中","completed":"完成","failed":"失败","pending":"等待","loading":"加载中"},"HomePage":{"run":"马上使用","description":"专业的电子发票合并打印解决方案","features":{"merge":"电子发票合并","batch":"批量处理","autoStats":"自动统计","oneClickPrint":"一键打印","pdfOptimize":"PDF优化","csvExport":"CSV导出"},"icp":"浙ICP备2023031851号-4"},"MainPage":{"dragUpload":"拖拽上传发票文件，自动合并处理","pdfPreview":"合并后预览","processing":"正在处理发票文件...","uploadedFiles":"上传的文件","invoiceCount":"发票数","amount":"金额","operations":"操作","downloadMerged":"下载合并文件","saveStats":"保存统计文件 (CSV)","confirmClear":"确认清空","clearConfirmMessage":"清空当前页面，您确定要继续吗？","stats":"发票统计","invoiceCountLabel":"发票数量:","totalAmountLabel":"总金额:","dividerLine":"分割线","dividerDesc":"A4双发票布局，便于裁剪","usageInstructions":"使用说明","features":"功能特点","featureList":{"batchUpload":"支持批量上传PDF发票文件","autoExtract":"自动提取发票代码、号码和金额","smartMerge":"智能合并为A4双发票布局","realTimePreview":"实时预览合并后的PDF文件"},"tips":"操作技巧","tipsList":{"dragDrop":"可直接拖拽文件到上传区域","multiSelect":"支持Ctrl/Shift多选文件","paperSaving":"合并后的PDF节约50%纸张","csvImport":"CSV文件可导入Excel进行管理"},"uploadTitle":"添加发票文件","uploadDescription":"支持拖拽上传或点击选择多个PDF发票文件","dropFiles":"放开文件开始上传...","dragFilesHere":"把发票文件拖进来这里","clickToSelect":"或点击选择文件（支持多选）","downloadMergedFileName":"发票打印助手_合并","downloadStatsFileName":"发票打印助手_统计","invoiceCountUnit":"张"},"TipsDialog":{"title":"实用技巧","question":"添加发票文件时，您一次只选择一个文件吗？好累哦 😥","solution":"您其实可以一次添加多个文件的:","instruction":"在点击\\"添加发票文件\\"按钮后打开的文件对话框中：","ctrlClickDesc":"点选多个文件","shiftClickDesc":"选择连续的多个文件","dragTip":"此外，您还可以直接把发票文件拖拽进网页来进行添加操作。","mouseLeftClick":"鼠标左键"},"Metadata":{"title":"发票打印助手","description":"专业的电子发票处理解决方案，支持批量合并、自动统计、一键打印。让报销更简单，让财务更轻松。免费在线使用。","keywords":"电子发票,发票合并,发票处理,PDF合并,批量处理,财务工具,报销工具,发票统计,发票打印","ogTitle":"发票打印助手 - 让报销更简单，让财务更轻松","ogDescription":"专业的电子发票处理解决方案，支持批量合并、自动统计、一键打印","twitterTitle":"发票打印助手","twitterDescription":"专业的电子发票处理解决方案，让报销更简单，让财务更轻松"},"CSVHeaders":{"invoiceCode":"发票代码","invoiceNumber":"发票号码","amount":"金额","fileName":"文件名"}},"now":"$undefined","timeZone":"Asia/Shanghai","children":[["$","$L3",null,{"parallelRouterKey":"children","error":"$undefined","errorStyles":"$undefined","errorScripts":"$undefined","template":["$","$L4",null,{}],"templateStyles":"$undefined","templateScripts":"$undefined","notFound":[["$","$L1b",null,{}],[]],"forbidden":"$undefined","unauthorized":"$undefined"}],["$","$L1c",null,{}]]}]\n',
+    ]);
+  </script>
+  <script>
+    self.__next_f.push([1, "c:null\n"]);
+  </script>
+  <script>
+    self.__next_f.push([
+      1,
+      '15:{"metadata":[["$","title","0",{"children":"发票打印助手"}],["$","meta","1",{"name":"description","content":"专业的电子发票处理解决方案，支持批量合并、自动统计、一键打印。让报销更简单，让财务更轻松。免费在线使用。"}],["$","meta","2",{"name":"author","content":"发票打印助手"}],["$","link","3",{"rel":"manifest","href":"/manifest.json","crossOrigin":"$undefined"}],["$","meta","4",{"name":"keywords","content":"电子发票,发票合并,发票处理,PDF合并,批量处理,财务工具,报销工具,发票统计,发票打印"}],["$","meta","5",{"name":"creator","content":"发票打印助手"}],["$","meta","6",{"name":"publisher","content":"发票打印助手"}],["$","meta","7",{"name":"robots","content":"index, follow"}],["$","meta","8",{"name":"apple-mobile-web-app-title","content":"发票打印助手"}],["$","meta","9",{"property":"og:title","content":"发票打印助手 - 让报销更简单，让财务更轻松"}],["$","meta","10",{"property":"og:description","content":"专业的电子发票处理解决方案，支持批量合并、自动统计、一键打印"}],["$","meta","11",{"property":"og:locale","content":"zh_CN"}],["$","meta","12",{"property":"og:type","content":"website"}],["$","meta","13",{"name":"twitter:card","content":"summary_large_image"}],["$","meta","14",{"name":"twitter:title","content":"发票打印助手"}],["$","meta","15",{"name":"twitter:description","content":"专业的电子发票处理解决方案，让报销更简单，让财务更轻松"}],["$","link","16",{"rel":"icon","href":"/favicon.ico","type":"image/x-icon","sizes":"48x48"}],["$","link","17",{"rel":"icon","href":"/icon0.svg?eb1262b39108723a","type":"image/svg+xml","sizes":"any"}],["$","link","18",{"rel":"icon","href":"/icon1.png?873064b22fb970bd","type":"image/png","sizes":"96x96"}],["$","link","19",{"rel":"apple-touch-icon","href":"/apple-icon.png?477d8be8c2b1658d","type":"image/png","sizes":"180x180"}]],"error":null,"digest":"$undefined"}\nf:{"metadata":"$15:metadata","error":null,"digest":"$undefined"}\n',
+    ]);
+  </script>
+  
+  <!-- [removed] GitHub Star float button -->
+  <script src="static/js/custom/print-guard.js" defer></script>
+  
+  <script>
+
+    const feedbackBtn = document.getElementById('feedbackBtn');
+    const feedbackPopup = document.getElementById('feedbackPopup');
+    if (feedbackBtn && feedbackPopup) {
+      feedbackBtn.onclick = (e) => {
+        e.stopPropagation();
+        feedbackPopup.classList.toggle('show');
+      };
+      document.onclick = (e) => !feedbackPopup.contains(e.target) && feedbackPopup.classList.remove('show');
+      feedbackPopup.onclick = (e) => e.stopPropagation();
+    }
+  </script>
+  <!-- [removed] top visitor stats widget -->
+  <!-- 二次开发：打车/网约车行程单半页裁剪。必须放在 patchArrayBufferForCropBox 之后加载，
+       以便包在 Blob.prototype.arrayBuffer 最外层，先拿到归一化后的字节再裁剪。 -->
+  <script src="static/js/custom/trip-crop.js" defer></script>
+</body>
+
+</html>

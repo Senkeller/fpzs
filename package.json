@@ -1,0 +1,15 @@
+{
+  "name": "invoice-print-helper",
+  "version": "6.1.0-custom",
+  "private": true,
+  "description": "发票打印助手 · 本地定制版（个人学习研究用途，All Rights Reserved）",
+  "scripts": {
+    "start": "node portable-server.js",
+    "start:dev": "node server.js",
+    "build:exe": "node build-exe.js",
+    "test": "node verify-trip-crop.js && node verify-expense-report.js && node verify-real-nanning.js && node verify-pdf-assets.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
