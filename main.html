@@ -664,13 +664,18 @@
         if (!window.__expenseReportTable) throw new Error('差旅报销单模块未加载');
       }
 
-      // 上传缓存里的 PDF 重新识别一遍，确认弹窗不显示过期数据
+      // 增量重识别：只补识别「尚未识别」的 PDF，避免每次生成都把全部 PDF 用 pdf.js
+      // 重新解析一遍（getInvoiceDataFromApp 也只补缺失项，二者叠加会让热缓存再生时
+      // 仍全量重解析，是反复「改完重新点生成」等待的主因）。已识别过的跳过即可。
+      // 取舍：同名文件被替换内容时不会自动重认（边缘情况；如需可加内容哈希缓存键）。
       async function refreshInvoiceRecognition() {
         if (!window.__fileDebugCache || window.__fileDebugCache.size === 0) return;
+        const cache = window.__invoiceDataCache || {};
         const rePending = [];
         for (const [name, file] of window.__fileDebugCache.entries()) {
           if (name.toLowerCase().endsWith('.pdf') &&
-            !name.includes('_副本') && !/^报销单[_-]|^报销单\.pdf$/i.test(name) && !name.startsWith('000_')) {
+            !name.includes('_副本') && !/^报销单[_-]|^报销单\.pdf$/i.test(name) && !name.startsWith('000_') &&
+            !cache[name]) {
             rePending.push(extractInvoiceDataFromPdf(name, file).then(d => { window.__invoiceDataCache[name] = d; }));
           }
         }

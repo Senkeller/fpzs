@@ -219,6 +219,8 @@ check('报销单卡片观察器与新统计卡片兼容（认「发票统计」�
   mainHtml.includes("发票统计') || t.includes('发票数量')"));
 check('报销单渲染降采样至 scale:2（避免点击生成卡顿 3-4s）',
   mainHtml.includes('scale: 2, useCORS'));
+check('重识别改为增量（跳过已识别 PDF，避免反复生成全量重解析）',
+  mainHtml.includes('!cache[name])') && mainHtml.includes('refreshInvoiceRecognition'));
 
 /* ---------- 6. 输出静态预览 ---------- */
 const previewDir = path.join(__dirname, '.workbuddy', 'preview');
