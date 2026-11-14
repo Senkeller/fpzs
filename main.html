@@ -149,6 +149,7 @@
             if (!window.__invoiceDataCache[name]) {
               extractInvoiceDataFromPdf(name, file).then((d) => {
                 window.__invoiceDataCache[name] = d;
+                if (typeof refreshStatsCard === 'function') refreshStatsCard();
               });
             }
           }
@@ -167,6 +168,7 @@
             extractInvoiceDataFromPdf(key, value).then((d) => {
               window.__invoiceDataCache[key] = d;
               console.log('✅ 自动识别完成:', key, '¥' + d.amount);
+              if (typeof refreshStatsCard === 'function') refreshStatsCard();
             });
           }
           return result;
@@ -175,6 +177,91 @@
         console.log('✅ 发票自动识别代理已启动');
       }
       setTimeout(initFileProxy, 300);
+
+      // ── 发票统计卡片修正：按实际识别内容分类（发票 / 行程单）──
+      // React 壳的「发票统计」卡片把每个上传文件都计为 1 张发票、且金额含行程单，
+      // 这里按 custom 识别结果（isTrip）重写为分类统计。
+      function statsItemsFiltered() {
+        return Object.values(window.__invoiceDataCache || {}).filter((v) => v &&
+          !/^报销单[_-]|^报销单\.pdf$/i.test(v.fileName || '') &&
+          !(v.fileName || '').startsWith('000_'));
+      }
+
+      function findStatsCard() {
+        // 卡片标题恒为「发票统计」（React 渲染），修正只替换 content，标题始终保留
+        for (const el of document.querySelectorAll('[data-slot="card"]')) {
+          const t = el.textContent || '';
+          if (t.includes('发票统计') || (t.includes('发票数量') && t.includes('总金额'))) return el;
+        }
+        return null;
+      }
+
+      function refreshStatsCard() {
+        try {
+          const items = statsItemsFiltered();
+          if (!items.length) return false;
+          const card = findStatsCard();
+          if (!card) return false;
+
+          const inv = items.filter((v) => !v.isTrip);
+          const trips = items.filter((v) => v.isTrip);
+          const invAmt = Math.round(inv.reduce((a, v) => a + (parseFloat(v.amount) || 0), 0) * 100) / 100;
+          const tripAmt = Math.round(trips.reduce((a, v) => a + (parseFloat(v.amount) || 0), 0) * 100) / 100;
+          const sig = [inv.length, invAmt.toFixed(2), trips.length, tripAmt.toFixed(2)].join('|');
+
+          const content = card.querySelector('[data-slot="card-content"]') || card;
+          // 内容指纹一致则跳过（防 React 重渲染 / 自身写入触发死循环）
+          const cur = content.querySelector('[data-stats-fixed]');
+          if (cur && cur.getAttribute('data-stats-sig') === sig) return true;
+
+          content.innerHTML = `
+            <div data-stats-fixed="1" data-stats-sig="${sig}" style="display:flex;flex-direction:column;gap:10px;">
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="color:#4b5563;">发票</span>
+                <span style="font-weight:600;">${inv.length} 张 · ¥${invAmt.toFixed(2)}</span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;">
+                <span style="color:#4b5563;">行程单</span>
+                <span style="font-weight:600;color:#b45309;">${trips.length} 份 · ¥${tripAmt.toFixed(2)}
+                  <span style="font-weight:400;color:#9ca3af;">（仅核对，不计入）</span></span>
+              </div>
+              <div style="display:flex;justify-content:space-between;align-items:center;border-top:1px dashed #e5e7eb;padding-top:8px;">
+                <span style="color:#4b5563;">合计（发票）</span>
+                <span style="font-weight:700;color:#15803d;">¥${invAmt.toFixed(2)}</span>
+              </div>
+            </div>`;
+          return true;
+        } catch (e) {
+          return false;
+        }
+      }
+
+      // 挂 MutationObserver：React 把统计卡片重渲染回原样后，立即按实际识别内容修正
+      // 注意：本脚本在 <head> 中同步执行，须等 document.body 就绪后再挂观察器
+      let _statsFixTimer = null;
+      function scheduleStatsFix() {
+        if (_statsFixTimer) return;
+        _statsFixTimer = setTimeout(() => {
+          _statsFixTimer = null;
+          refreshStatsCard();
+        }, 150);
+      }
+      (function watchStatsCard() {
+        const tryStart = () => {
+          if (!document.body) { setTimeout(tryStart, 250); return; }
+          const obs = new MutationObserver(() => {
+            try {
+              // 卡片标题「发票统计」恒存在；React 重渲染恢复原样后能再次捕获并修正
+              const card = findStatsCard();
+              if (card) scheduleStatsFix();
+            } catch (e) { /* ignore */ }
+          });
+          obs.observe(document.body, { childList: true, subtree: true });
+          setTimeout(() => obs.disconnect(), 600000); // 10 分钟后释放
+          refreshStatsCard();
+        };
+        tryStart();
+      })();
 
       function parseStatsFromDOM() {
         let totalAmount = null;
