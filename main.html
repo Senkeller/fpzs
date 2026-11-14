@@ -694,7 +694,9 @@
           for (let pi = 0; pi < reportPages.length; pi++) {
             if (pi > 0) pdf.addPage();
             const canvas = await html2canvas(reportPages[pi], {
-              scale: 4, useCORS: true, logging: false, backgroundColor: '#ffffff',
+              // 报销单为纯文字/表格表单，scale:2 已等效 ~192DPI（A4 打印够用）；
+              // 原 scale:4 单页栅格化达 3176x4492≈1400万像素，是点击生成卡顿 3-4s 的主因。
+              scale: 2, useCORS: true, logging: false, backgroundColor: '#ffffff',
               windowWidth: 794, width: 794, height: 1123,
             });
             const imgData = canvas.toDataURL('image/png');
