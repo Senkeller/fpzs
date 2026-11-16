@@ -650,6 +650,134 @@
           return repaired;
         } catch (e) { console.warn('内容流修复异常(忽略):', e && e.message); return 0; }
       }
+      // 修复「描边被推迟到文末」的票据。部分开票系统(如高德/鞍马打车电子发票)把表格
+      // 框线的路径构造与描边操作 S 拆得很远,中间夹了几十个 BT/ET 文本块。按 PDF 规范
+      // 路径不属于图形状态、BT/ET 不会清空它,Acrobat/WPS 能正常画出边框;但 pdf.js 的
+      // endText() 每次遇到 ET 都会 beginPath(),把待描边的路径直接丢掉,于是预览和打印
+      // 出来整页没有外框、也没有表格线。这里在每处 BT 之前把当前路径先描边一次,
+      // 各渲染器的结果就一致了。只对确实存在该缺陷的页面改写内容流。
+      var _PDF_DELIM = ' \t\r\n\f\0()<>[]{}/%';
+      var _PDF_PATH_OPS = { m: 1, l: 1, c: 1, v: 1, y: 1, re: 1, h: 1 };
+      var _PDF_PAINT_OPS = { S: 1, s: 1, f: 1, F: 1, 'f*': 1, B: 1, 'B*': 1, b: 1, 'b*': 1, n: 1 };
+
+      // 轻量分词：只需辨认操作符与字符串/名字/注释的边界，无需完整解析
+      function _pdfTokenize(str) {
+        var toks = [], i = 0, n = str.length;
+        while (i < n) {
+          var c = str.charCodeAt(i);
+          if (c === 32 || c === 10 || c === 13 || c === 9 || c === 12 || c === 0) { i++; continue; }
+          if (c === 37) { // % 注释
+            while (i < n && str.charCodeAt(i) !== 10 && str.charCodeAt(i) !== 13) i++;
+            continue;
+          }
+          var start = i, ch = str[i];
+          if (ch === '(') {
+            var d = 1; i++;
+            while (i < n && d > 0) {
+              var cc = str[i];
+              if (cc === '\\') { i += 2; continue; }
+              if (cc === '(') d++;
+              else if (cc === ')') d--;
+              i++;
+            }
+            continue;
+          }
+          if (ch === '<') {
+            if (str[i + 1] === '<') { i += 2; continue; }
+            i++;
+            while (i < n && str[i] !== '>') i++;
+            i++;
+            continue;
+          }
+          if (ch === '>') { i += str[i + 1] === '>' ? 2 : 1; continue; }
+          if (ch === '/') {
+            i++;
+            while (i < n && _PDF_DELIM.indexOf(str[i]) === -1) i++;
+            continue;
+          }
+          if (ch === '[' || ch === ']' || ch === '{' || ch === '}') { i++; continue; }
+          while (i < n && _PDF_DELIM.indexOf(str[i]) === -1) i++;
+          toks.push({ t: str.slice(start, i), i: start });
+        }
+        return toks;
+      }
+
+      function _pdfPatchDeferredStrokes(content) {
+        var toks = _pdfTokenize(content);
+        var pending = 0, inserts = [];
+        for (var k = 0; k < toks.length; k++) {
+          var t = toks[k].t;
+          // 内联图像(BI...ID<二进制>EI)里可能藏着任意字节，不做处理以免误伤
+          if (t === 'BI') return { text: content, inserted: 0 };
+          if (_PDF_PATH_OPS[t]) { pending++; continue; }
+          if (_PDF_PAINT_OPS[t]) { pending = 0; continue; }
+          if (t === 'BT' && pending > 0) {
+            // 只有当这段路径最终是被「描边」时才补，避免给原本只做填充的图形多画一圈边
+            var nextPaint = '';
+            for (var q = k + 1; q < toks.length; q++) {
+              if (_PDF_PAINT_OPS[toks[q].t]) { nextPaint = toks[q].t; break; }
+            }
+            if (nextPaint === 'S' || nextPaint === 's' || nextPaint === 'B' ||
+                nextPaint === 'B*' || nextPaint === 'b' || nextPaint === 'b*') {
+              inserts.push(toks[k].i);
+            }
+            pending = 0;
+          }
+        }
+        if (!inserts.length) return { text: content, inserted: 0 };
+        var out = content;
+        for (var j = inserts.length - 1; j >= 0; j--) {
+          out = out.slice(0, inserts[j]) + 'S\n' + out.slice(inserts[j]);
+        }
+        return { text: out, inserted: inserts.length };
+      }
+
+      function _pdfBytesToLatin1(bytes) {
+        var s = '', CH = 8192;
+        for (var i = 0; i < bytes.length; i += CH) {
+          s += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+        }
+        return s;
+      }
+      function _pdfLatin1ToBytes(str) {
+        var a = new Uint8Array(str.length);
+        for (var i = 0; i < str.length; i++) a[i] = str.charCodeAt(i) & 0xff;
+        return a;
+      }
+
+      function _repairDeferredStrokes(PDFLib, pdfDoc) {
+        try {
+          var ctx = pdfDoc.context, fixed = 0;
+          var pages = pdfDoc.getPages();
+          for (var pgi = 0; pgi < pages.length; pgi++) {
+            var node = pages[pgi].node;
+            var cref = node.get(PDFLib.PDFName.of('Contents'));
+            if (!cref) continue;
+            // /Contents 可能是单个流，也可能是流数组（内容按顺序拼接）
+            var refs = [];
+            var resolved = ctx.lookup(cref);
+            if (resolved && typeof resolved.size === 'function' && !resolved.dict) {
+              for (var ai = 0; ai < resolved.size(); ai++) refs.push(resolved.get(ai));
+            } else {
+              refs.push(cref);
+            }
+            var parts = [], ok = true;
+            for (var ri = 0; ri < refs.length; ri++) {
+              var st = ctx.lookup(refs[ri]);
+              if (!st || !st.dict) { ok = false; break; }
+              try { parts.push(_pdfBytesToLatin1(PDFLib.decodePDFRawStream(st).decode())); }
+              catch (e) { ok = false; break; }
+            }
+            if (!ok) continue;
+            var res = _pdfPatchDeferredStrokes(parts.join('\n'));
+            if (!res.inserted) continue;
+            node.set(PDFLib.PDFName.of('Contents'), ctx.register(ctx.flateStream(_pdfLatin1ToBytes(res.text))));
+            fixed++;
+            console.log('🔧 补齐延迟描边: 第 ' + (pgi + 1) + ' 页, ' + res.inserted + ' 处');
+          }
+          return fixed;
+        } catch (e) { console.warn('延迟描边修复异常(忽略):', e && e.message); return 0; }
+      }
       async function A(e, t, n) {
         console.log('🔧 合并参数: noline=', t, 'method=', n, 'files=', e.length);
         try {
@@ -672,6 +800,10 @@
             if (!file) { console.warn('合并: 未找到文件 size=', item.size); continue; }
             var buf = await file.arrayBuffer();
             var src = await PDFLib.PDFDocument.load(buf, { ignoreEncryption: true });
+            // 修复外框/表格线描边被推迟到文末、导致 pdf.js 渲染时整页无边框的票据。
+            // 必须放在 _repairMissingContentStreams 之前：后者内部的 normalizedEntries()
+            // 会把 /Contents 改写成 pdf-lib 内部的 PDFContentStream，之后就不便按原始流读取了。
+            _repairDeferredStrokes(PDFLib, src);
             // 修复内容流 /Length 为间接引用的数电发票,使其可被 pdf-lib 原生嵌入
             _repairMissingContentStreams(PDFLib, src, buf);
             var pageIndices = item.ips && item.ips.length > 0 ? item.ips.map(function(p){return p-1;}) : src.getPageIndices();
