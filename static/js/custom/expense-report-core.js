@@ -107,7 +107,7 @@
       const pdf = await window.pdfjsLib.getDocument({
         data: arrayBuffer,
 
-        cMapUrl: 'static/cmaps/',
+        cMapUrl: new URL('static/cmaps/', window.location.href).href,
         cMapPacked: true,
       }).promise;
 

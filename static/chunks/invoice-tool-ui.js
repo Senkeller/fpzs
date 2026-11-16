@@ -520,10 +520,10 @@
           [d, x] = (0, n.useState)(!1),
           u = (0, n.useMemo)(
             () => ({
-              cMapUrl: "static/cmaps/",
+              cMapUrl: new URL("static/cmaps/", window.location.href).href,
               cMapPacked: !0,
               standardFontDataUrl:
-                "static/standard_fonts/",
+                new URL("static/standard_fonts/", window.location.href).href,
               isEvalSupported: !1,
               maxImageSize: 1048576,
               disableFontFace: !1,
@@ -543,10 +543,10 @@
           ),
           g = (0, n.useMemo)(
             () => ({
-              cMapUrl: "static/cmaps/",
+              cMapUrl: new URL("static/cmaps/", window.location.href).href,
               cMapPacked: !0,
               standardFontDataUrl:
-                "static/standard_fonts/",
+                new URL("static/standard_fonts/", window.location.href).href,
               disableFontFace: !0,
               fontExtraProperties: !0,
               useSystemFonts: !0,
@@ -1302,10 +1302,10 @@
           }, [I, Z, t.mergedPdfUrl, pe]));
         let Se = (0, n.useMemo)(
           () => ({
-            cMapUrl: "static/cmaps/",
+            cMapUrl: new URL("static/cmaps/", window.location.href).href,
             cMapPacked: !0,
             standardFontDataUrl:
-              "static/standard_fonts/",
+              new URL("static/standard_fonts/", window.location.href).href,
             isEvalSupported: !1,
             maxImageSize: 1048576,
             disableFontFace: !1,
@@ -1325,10 +1325,10 @@
         ),
           Ee = (0, n.useMemo)(
             () => ({
-              cMapUrl: "static/cmaps/",
+              cMapUrl: new URL("static/cmaps/", window.location.href).href,
               cMapPacked: !0,
               standardFontDataUrl:
-                "static/standard_fonts/",
+                new URL("static/standard_fonts/", window.location.href).href,
               disableFontFace: !0,
               fontExtraProperties: !0,
               useSystemFonts: !0,

@@ -125,7 +125,7 @@
     try {
       pdf = await window.pdfjsLib.getDocument({
         data: buf.slice(0), // pdf.js 会 transfer 传入的 buffer，必须给副本
-        cMapUrl: 'static/cmaps/',
+        cMapUrl: new URL('static/cmaps/', window.location.href).href,
         cMapPacked: true,
         useSystemFonts: true
       }).promise;
