@@ -20,6 +20,7 @@ let sea = null;
 try { sea = require('node:sea'); } catch (e) { /* 老版本 Node 无 node:sea */ }
 const IS_SEA = !!(sea && sea.isSea());
 const ROOT = __dirname;
+process.title = '发票打印助手';
 
 // 单实例自检用的健康端点（不参与资源服务，不会被真实文件覆盖）
 const HEALTH_PATH = '/__healthz';
@@ -73,6 +74,13 @@ const server = http.createServer((req, res) => {
       return send(res, 200, 'text/plain; charset=utf-8', Buffer.from(HEALTH_BODY, 'utf8'));
     }
 
+    // 优雅退出端点：无黑窗口（GUI 子系统）模式下也能关掉服务
+    if (url === '/__quit') {
+      send(res, 200, 'text/plain; charset=utf-8', Buffer.from('正在退出…', 'utf8'));
+      setImmediate(() => process.exit(0));
+      return;
+    }
+
     const rel = toAsset(url);
     if (!rel) return send(res, 400, 'text/plain; charset=utf-8', Buffer.from('Bad Request', 'utf8'));
 
@@ -119,6 +127,24 @@ server.on('clientError', (err, socket) => {
   if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
 });
 
+// 启动横幅：控制台下带 ANSI 配色；管道/重定向时自动退化为纯文本
+function printBanner(port) {
+  const url = 'http://127.0.0.1:' + port + '/';
+  const tty = !!process.stdout.isTTY;
+  const a = (n) => (tty ? '\x1b[' + n + 'm' : '');
+  const R = a(0), B = a('1;36'), D = a(2), G = a(32), Y = a(33);
+  const rule = D + '  ' + '-'.repeat(46) + R;
+  console.log('');
+  console.log('  ' + B + '发票打印助手' + R + D + '   本地单文件便携版' + R);
+  console.log(rule);
+  console.log('  ' + G + '打开浏览器 : ' + R + url);
+  console.log('  ' + G + '资源来源   : ' + R + (IS_SEA ? '已内嵌于 exe（无需安装、无需联网）' : ROOT));
+  console.log('  ' + Y + '退出方式   : ' + R + '关闭本窗口，或访问 ' + url + '__quit');
+  console.log(rule);
+  console.log('');
+  return url;
+}
+
 const BASE_PORT = Number(process.env.PORT) || 8000;
 const MAX_TRY = 20;
 let attempt = 0;
@@ -139,14 +165,7 @@ function startServer(port) {
     }
   });
   server.listen(port, '127.0.0.1', () => {
-    const url = 'http://127.0.0.1:' + port + '/';
-    console.log('');
-    console.log('  Invoice Print Helper  ' + (IS_SEA ? '[standalone exe]' : '[node]'));
-    console.log('  ------------------------------------------');
-    console.log('  Open in browser : ' + url);
-    console.log('  Serving files   : ' + (IS_SEA ? 'embedded in exe' : ROOT));
-    console.log('  Press Ctrl+C or close this window to stop.');
-    console.log('');
+    const url = printBanner(port);
     if (!process.env.NO_BROWSER) openBrowser(url);
   });
 }

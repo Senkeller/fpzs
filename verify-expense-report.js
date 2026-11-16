@@ -204,8 +204,11 @@ check('改行程单日期也能让配对发票回到范围内',
   a6.issues.length === 0 && a6.model.dayRows.find(r => r.key === '2026-10-22').cells.taxi === 3025);
 
 /* ---------- 5. 页面生成链路静态约束 ---------- */
-console.log('\n=== E. main.html 生成链路 ===');
-const mainHtml = fs.readFileSync(path.join(__dirname, 'main.html'), 'utf8');
+console.log('\n=== E. 生成链路（main.html + main-bootstrap.js） ===');
+// 报销单生成链路已从 main.html 拆到 static/js/custom/main-bootstrap.js，
+// 两处拼起来才是完整源码，只读 main.html 会全部误报 FAIL。
+const mainHtml = fs.readFileSync(path.join(__dirname, 'main.html'), 'utf8') + '\n' +
+  fs.readFileSync(path.join(__dirname, 'static/js/custom/main-bootstrap.js'), 'utf8');
 check('两条入口统一走同一个确认窗口',
   mainHtml.includes('window.generateExpenseReportManual = generateExpenseReport;') &&
   !mainHtml.includes('async function generateExpenseReportManual()'));
@@ -217,8 +220,10 @@ check('人工修正持久化到下次生成',
 check('日期格式化改用本地年月日（修复少一天）', mainHtml.includes("getMonth() + 1).padStart(2, '0')"));
 check('报销单卡片观察器与新统计卡片兼容（认「发票统计」标题，不被误删）',
   mainHtml.includes("发票统计') || t.includes('发票数量')"));
-check('报销单渲染降采样至 scale:2（避免点击生成卡顿 3-4s）',
-  mainHtml.includes('scale: 2, useCORS'));
+check('报销单在离屏沙箱里栅格化（主文档 980 条全局 CSS 会让 html2canvas 慢 5 倍）',
+  mainHtml.includes('createReportSandbox') && mainHtml.includes('scale: rasterScale'));
+check('报销单图片走 JPEG 直传（跳过多 MB 的 base64 与二次 deflate）',
+  mainHtml.includes("toBlob(res, 'image/jpeg'") && mainHtml.includes("'JPEG'"));
 check('重识别改为增量（跳过已识别 PDF，避免反复生成全量重解析）',
   mainHtml.includes('!cache[name])') && mainHtml.includes('refreshInvoiceRecognition'));
 

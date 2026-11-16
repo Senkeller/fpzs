@@ -102,15 +102,25 @@ console.log('Base exe: ' + (fs.statSync(EXE).size / 1024 / 1024).toFixed(2) + ' 
 
 // ---- 5. postject 注入资源节 ----
 const cli = path.join(BUILD, 'node_modules', 'postject', 'dist', 'cli.js');
-if (!fs.existsSync(cli)) {
-  console.log('Installing postject (build-time only) ...');
-  cp.execSync('npm install --prefix "' + BUILD + '" postject --no-audit --no-fund --loglevel=error',
+const needInstall = !fs.existsSync(cli)
+  || !fs.existsSync(path.join(BUILD, 'node_modules', 'resedit', 'dist', 'index.js'))
+  || !fs.existsSync(path.join(BUILD, 'node_modules', 'png-to-ico', 'index.js'));
+if (needInstall) {
+  console.log('Installing build-time deps (postject, resedit, png-to-ico) ...');
+  cp.execSync('npm install --prefix "' + BUILD + '" postject resedit png-to-ico --no-audit --no-fund --loglevel=error',
     { cwd: ROOT, stdio: 'inherit' });
 }
 if (!fs.existsSync(cli)) throw new Error('postject 安装失败：' + cli);
 cp.execFileSync(process.execPath, [cli, EXE, 'NODE_SEA_BLOB', BLOB, '--sentinel-fuse', FUSE],
   { cwd: ROOT, stdio: 'inherit' });
 
+// ---- 6. 注入图标 + 版本信息（纯 JS，免外部原生工具；可选 GUI=1 隐藏控制台窗口）----
+console.log('Embedding icon & version info ...');
+const metaArgs = [path.join(ROOT, 'tools', 'set-exe-metadata.mjs'), EXE];
+if (process.env.GUI) metaArgs.push('--gui');
+cp.execFileSync(process.execPath, metaArgs, { cwd: ROOT, stdio: 'inherit' });
+
 console.log('');
 console.log('DONE: ' + EXE + '  (' + (fs.statSync(EXE).size / 1024 / 1024).toFixed(2) + ' MiB)');
 console.log('Double-click it, or run:  set NO_BROWSER=1 && "' + EXE + '"');
+if (process.env.GUI) console.log('GUI 模式已启用：双击无黑窗口，退出请访问 http://127.0.0.1:8000/__quit');
