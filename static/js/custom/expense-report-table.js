@@ -329,8 +329,11 @@
     // 确认弹窗内的预览：去掉 A4 底部大片留白，只保留表格本体（正式 PDF 版式不受影响）
     var previewMode = !!(helpers && helpers.preview);
 
-    // Word tblGrid 列宽（twips）换算成百分比，保持原件各列比例
-    var colWidths = [11.9, 12.0, 12.0, 8.3, 8.3, 6.3, 10.5, 8.5, 12.4, 8.7];
+    // Word tblGrid 列宽（twips）换算成百分比，保持原件各列比例。
+    // 小计列要容纳多位数合计金额（如 1042.36），原来只给 8.7% 导致数字顶破右边框，
+    // 这里明显加宽；日期/地点/原因三列内容很短，相应收窄。金额另按位数自适应字号
+    // （见 amountStyle），双保险防止大金额溢出。
+    var colWidths = [11.2, 11.5, 11.5, 8.0, 8.0, 6.5, 9.0, 7.0, 12.5, 11.8];
     var colgroup = '<colgroup>' + colWidths.map(function (w) {
       return '<col style="width:' + w + '%">';
     }).join('') + '</colgroup>';
@@ -342,8 +345,17 @@
     var thSmall = base + 'text-align:center;font-weight:bold;font-size:13px;';
     var thSub = base + 'text-align:center;font-weight:normal;font-size:13px;';
     var tdCenter = base + 'text-align:center;font-size:14px;';
-    var tdRight = base + 'text-align:right;font-size:14px;padding-right:7px;';
+    var tdRight = base + 'text-align:right;font-size:14px;padding-right:4px;';
     var tdBold = base + 'font-weight:bold;font-size:14px;';
+
+    // 金额列：位数越多字号越小，保证大额（如 1042.36 甚至更长）不会顶破单元格右边框。
+    // 右内边距收到 4px，给数字多留空间；white-space:nowrap 避免数字被折行。
+    function amountStyle(text, bold) {
+      var len = String(text == null ? '' : text).length;
+      var size = len > 9 ? 10 : len > 7 ? 11 : len > 6 ? 12 : 14;
+      return (bold ? tdBold + 'text-align:right;' : tdRight) +
+        'white-space:nowrap;font-size:' + size + 'px;';
+    }
 
     // 两行表头：第一行 车船费 跨 3 列，住宿费/补贴/其他(退票费)/小计 跨两行；
     // 第二行才是 车船费 下的 普票费/打的费/其他 三个子列。
@@ -377,8 +389,8 @@
 
     function cellsHTML(c, showZero, bold) {
       return COLS.map(function (k) {
-        return '<td style="' + (bold ? tdBold + 'text-align:right;padding-right:7px;' : tdRight) + '">' +
-          fmt(c[k], showZero) + '</td>';
+        var text = fmt(c[k], showZero);
+        return '<td style="' + amountStyle(text, bold) + '">' + text + '</td>';
       }).join('');
     }
 
@@ -405,12 +417,13 @@
     for (var i = 0; i < rows.length; i += cfg.rowsPerPage) chunks.push(rows.slice(i, i + cfg.rowsPerPage));
     if (chunks.length === 0) chunks.push([]);
 
+    var grandText = fmt(model.grandTotal, true);
     var totalRow = '<tr style="height:26px;">' +
       '<td style="' + tdBold + 'text-align:center;">合计</td>' +
       '<td style="' + tdBold + 'text-align:center;">/</td>' +
       '<td style="' + tdBold + 'text-align:center;">/</td>' +
       cellsHTML(model.totals, true, true) +
-      '<td style="' + tdBold + 'text-align:center;">' + fmt(model.grandTotal, true) + '</td>' +
+      '<td style="' + amountStyle(grandText, true) + '">' + grandText + '</td>' +
       '</tr>';
 
     function buildPage(chunk, pageIndex, isLast) {
