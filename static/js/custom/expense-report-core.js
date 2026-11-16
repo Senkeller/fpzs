@@ -343,10 +343,70 @@
     }
   }
 
+  // 发票统计口径：只统计“当前上传的文件”，不能把历史缓存里的旧票据一起算进去。
+  // currentFiles 为 null/undefined 时表示拿不到当前文件列表，退回旧口径（兼容早期调用）。
+  function isIgnoredStatsFile(fileName) {
+    var name = fileName || '';
+    return /^报销单[_-]|^报销单\.pdf$/i.test(name) || name.indexOf('000_') === 0;
+  }
+
+  function selectInvoiceStatsItems(currentFiles, cache, keyOf) {
+    var cacheObj = cache || {};
+    var entries = Object.keys(cacheObj).map(function (key) { return [key, cacheObj[key]]; });
+    var normalizeKey = typeof keyOf === 'function'
+      ? keyOf
+      : function (file) {
+          return [file && file.name || '', file && file.size || 0, file && file.lastModified || 0].join('::');
+        };
+
+    if (!Array.isArray(currentFiles)) {
+      return {
+        known: false,
+        items: entries.filter(function (entry) {
+          return entry[1] && !isIgnoredStatsFile(entry[1].fileName);
+        }).map(function (entry) { return entry[1]; })
+      };
+    }
+
+    var result = new Map();
+    var alias = new Map();
+    currentFiles.forEach(function (file) {
+      if (!file) return;
+      var name = file.name || file.fileName || '';
+      if (!name || isIgnoredStatsFile(name)) return;
+      var canonical = normalizeKey(file) || name;
+      if (!result.has(canonical)) {
+        // 识别未完成时也先占位，保证“发票 + 行程单”始终等于当前文件数。
+        result.set(canonical, { fileName: name, amount: 0, isTrip: false, __pending: true });
+      }
+      alias.set(canonical, canonical);
+      alias.set(name, canonical);
+    });
+
+    // 同一文件可能同时存在「文件名」和「指纹」两个历史缓存键；指纹键优先，避免重复计数。
+    var seen = new Set();
+    entries.sort(function (a, b) {
+      return (String(b[0]).indexOf('::') >= 0 ? 1 : 0) - (String(a[0]).indexOf('::') >= 0 ? 1 : 0);
+    }).forEach(function (entry) {
+      var key = entry[0];
+      var value = entry[1];
+      if (!value) return;
+      var name = value.fileName || '';
+      if (isIgnoredStatsFile(name)) return;
+      var canonical = alias.get(key) || alias.get(name);
+      if (!canonical || seen.has(canonical)) return;
+      seen.add(canonical);
+      result.set(canonical, value);
+    });
+
+    return { known: true, items: Array.from(result.values()) };
+  }
+
   window.__expenseReportCore = {
     initPdfJs,
     extractInvoiceDataFromPdf,
     extractTripInfo,
+    selectInvoiceStatsItems,
     TRIP_NAME_RE,
   };
 

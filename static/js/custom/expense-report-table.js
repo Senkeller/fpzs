@@ -317,7 +317,7 @@
   /*
    * 版式蓝本：差旅费用报销清单（内部表单模板）
    *   A4 纵向；右上「编号：YF-FBCW10-2022」；黑体 16pt 居中标题
-   *   「出差记录及费用报销清单」；下一行「出差人：…   2026 年 9月6 ~ 9月10日」；
+   *   「出差记录及费用报销清单」；下一行「出差人：…   2026年9月6日- 9月10日」；
    *   10 列细线表、两行表头（车船费跨三列，第二行才是普票费/打的费/其他）；
    *   数据行 10.5pt 宋体、每天重复填地点与原因、金额空值留空、小计列留空；
    *   合计行加粗且每列都写数（含 0）。原件无记账凭证附件、大写金额与签章栏。
@@ -382,8 +382,8 @@
     }
     function rangeText(s, e) {
       if (!s || !e) return '';
-      return s.getFullYear() + ' 年 ' + (s.getMonth() + 1) + '月' + s.getDate() +
-        ' ~ ' + (s.getFullYear() !== e.getFullYear() ? e.getFullYear() + ' 年 ' : '') +
+      return s.getFullYear() + '年' + (s.getMonth() + 1) + '月' + s.getDate() + '日' +
+        '- ' + (s.getFullYear() !== e.getFullYear() ? e.getFullYear() + '年' : '') +
         (e.getMonth() + 1) + '月' + e.getDate() + '日';
     }
 

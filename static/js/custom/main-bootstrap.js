@@ -120,13 +120,71 @@
       }
       setTimeout(initFileProxy, 300);
 
-      // ── 发票统计卡片修正：按实际识别内容分类（发票 / 行程单）──
-      // React 壳的「发票统计」卡片把每个上传文件都计为 1 张发票、且金额含行程单，
-      // 这里按 custom 识别结果（isTrip）重写为分类统计。
-      function statsItemsFiltered() {
-        return Object.values(window.__invoiceDataCache || {}).filter((v) => v &&
-          !/^报销单[_-]|^报销单\.pdf$/i.test(v.fileName || '') &&
-          !(v.fileName || '').startsWith('000_'));
+      // ── 发票统计卡片修正：按“当前上传文件”分类（发票 / 行程单）──
+      // 缓存里会残留已删除/清空的历史文件；旧逻辑直接遍历 __invoiceDataCache，
+      // 于是上传 10 个文件却可能显示 16 张发票 + 4 份行程单。现在以 React 的
+      // invoiceFiles 为事实源，只统计当前文件，并对同一文件的重复缓存键去重。
+      function currentUploadedFiles() {
+        // React 状态里 invoiceFiles 与用户看到的文件数量严格一致。
+        try {
+          const root = document.querySelector('#__next') || document.body;
+          const fk = root && Object.keys(root).find(
+            (k) => k.startsWith('__reactFiber') || k.startsWith('__reactInternalInstance')
+          );
+          if (fk) {
+            let found = null;
+            const visit = (node, depth) => {
+              if (found || !node || depth > 20) return;
+              let hook = node.memoizedState;
+              while (hook) {
+                const state = hook.memoizedState;
+                if (state && Array.isArray(state.invoiceFiles)) {
+                  found = state.invoiceFiles;
+                  return;
+                }
+                if (state && state.current && Array.isArray(state.current.invoiceFiles)) {
+                  found = state.current.invoiceFiles;
+                  return;
+                }
+                hook = hook.next;
+              }
+              visit(node.child, depth + 1);
+              visit(node.sibling, depth + 1);
+            };
+            visit(root[fk], 0);
+            if (found) {
+              return found
+                .map((entry) => (entry && entry.file) || entry)
+                .filter((file) => file && (file.name || file.fileName));
+            }
+          }
+        } catch (e) { /* React 内部结构不可用时退回 input.files */ }
+
+        try {
+          const inputs = document.querySelectorAll('input[type="file"]');
+          const files = [];
+          inputs.forEach((input) => {
+            for (const file of (input.files || [])) files.push(file);
+          });
+          return inputs.length > 0 ? files : null;
+        } catch (e) {
+          return null;
+        }
+      }
+
+      function collectStatsItems() {
+        const selector = window.__expenseReportCore && window.__expenseReportCore.selectInvoiceStatsItems;
+        const files = currentUploadedFiles();
+        if (typeof selector === 'function') {
+          return selector(files, window.__invoiceDataCache || {}, fileKeyOf);
+        }
+        // 兜底：core 未加载新选择器时维持旧行为。
+        return {
+          known: Array.isArray(files),
+          items: Object.values(window.__invoiceDataCache || {}).filter((v) => v &&
+            !/^报销单[_-]|^报销单\.pdf$/i.test(v.fileName || '') &&
+            !(v.fileName || '').startsWith('000_'))
+        };
       }
 
       function findStatsCard() {
@@ -140,8 +198,8 @@
 
       function refreshStatsCard() {
         try {
-          const items = statsItemsFiltered();
-          if (!items.length) return false;
+          const { items, known } = collectStatsItems();
+          if (!items.length && !known) return false;
           const card = findStatsCard();
           if (!card) return false;
 

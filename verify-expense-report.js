@@ -38,6 +38,35 @@ const invText = '电子发票（普通发票） 开票日期：2026年11月2日 
 const iInfo = tripInfo(invText, invText.replace(/\s+/g, ''), '滴滴电子发票.pdf');
 check('发票不会被误判为行程单', iInfo.isTrip === false);
 
+/* ---------- 1b. 发票统计口径：当前文件 vs 历史缓存 ---------- */
+console.log('\n=== A2. 发票统计卡片口径 ===');
+const selectStats = global.__expenseReportCore.selectInvoiceStatsItems;
+const fileKey = (f) => [f && f.name || '', f && f.size || 0, f && f.lastModified || 0].join('::');
+const currentFiles = [
+  { name: '发票A.pdf', size: 100, lastModified: 1 },
+  { name: '行程单A.pdf', size: 200, lastModified: 2 },
+  { name: '发票B.pdf', size: 300, lastModified: 3 }
+];
+const statsCache = {
+  '旧发票::50::0': { fileName: '旧发票.pdf', amount: 99, isTrip: false },
+  [fileKey(currentFiles[0])]: { fileName: '发票A.pdf', amount: 11.7, isTrip: false },
+  '发票A.pdf': { fileName: '发票A.pdf', amount: 11.7, isTrip: false },
+  [fileKey(currentFiles[1])]: { fileName: '行程单A.pdf', amount: 15, isTrip: true },
+  [fileKey(currentFiles[2])]: { fileName: '发票B.pdf', amount: 18, isTrip: false },
+  '000_报销单.pdf': { fileName: '000_报销单.pdf', amount: 1000, isTrip: false }
+};
+const picked = selectStats(currentFiles, statsCache, fileKey);
+check('统计数量等于当前上传文件数', picked.known === true && picked.items.length === 3,
+  'items=' + picked.items.length);
+check('历史缓存文件不再计入统计', !picked.items.some((i) => i.fileName === '旧发票.pdf'));
+check('同一文件的重复缓存键只计一次',
+  picked.items.filter((i) => i.fileName === '发票A.pdf').length === 1);
+check('行程单分类与金额保留',
+  picked.items.some((i) => i.fileName === '行程单A.pdf' && i.isTrip === true && i.amount === 15));
+check('生成的报销单不计入统计', !picked.items.some((i) => i.fileName === '000_报销单.pdf'));
+const clearedStats = selectStats([], statsCache, fileKey);
+check('清空后统计归零', clearedStats.known === true && clearedStats.items.length === 0);
+
 /* ---------- 2. 报销单数据模型 ---------- */
 console.log('\n=== B. 差旅报销单数据模型 ===');
 const T = require('./static/js/custom/expense-report-table.js');
@@ -117,6 +146,15 @@ check('表头「车船费」跨 3 列', /colspan="3"[^>]*>车船费</.test(htmlA
 check('表头 7 个跨 2 行单元格', (htmlA.match(/rowspan="2"/g) || []).length === 7);
 check('表头含「其他（退票费）」', htmlA.includes('（退票费）'));
 check('日期格式 2026/10/19', htmlA.includes('2026/10/19') && htmlA.includes('2026/10/23'));
+check('表头日期格式 2026年10月19日- 10月23日',
+  htmlA.includes('2026年10月19日- 10月23日') &&
+  !htmlA.includes(' ~ ') && !htmlA.includes(' 年 '),
+  (htmlA.match(/2026年[^<]*/) || [''])[0]);
+const crossYearHtml = T.generateExpenseReportHTML([], null,
+  { startDate: '2026-12-30', endDate: '2027-01-02', dailyAllowance: 50 },
+  { numberToChinese: toChinese });
+check('跨年日期格式 2026年12月30日- 2027年1月2日',
+  crossYearHtml.includes('2026年12月30日- 2027年1月2日'));
 check('合计行含 0 与 250', /合计<\/td>/.test(htmlA) && htmlA.includes('>250<'));
 check('版式对齐参考清单：标题 / 编号 / 出差人 / 两行表头',
   htmlA.includes('出差记录及费用报销清单') && htmlA.includes('编号：YF-FBCW10-2022') &&
