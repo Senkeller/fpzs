@@ -637,6 +637,30 @@
       //   主文档里栅格化 609ms，放进无全局样式的干净 iframe 里只要 122ms（5 倍）。
       // 所以这里先在离屏 iframe 里造一个「只有报销单自身内联样式」的文档再栅格化，
       // 输出像素与主文档渲染完全一致（已逐图比对）。失败则回退主文档渲染。
+      /*
+       * html2canvas 没有实现 table-cell 的 vertical-align:middle：它按文字节点自身的
+       * 行盒 + 字体 baseline 定位，但表格单元格里的文字被画到靠近下边框的位置
+       * （实测比浏览器原生渲染低约 8px，14px 字的下留白只剩 2~3px），
+       * 所以数字会压在下边框线上——尤其是加粗的合计行最明显。
+       * 这里在栅格化前把单元格里的直接文本节点包一层 position:relative 的 span
+       * 上移 8px（html2canvas 会按 span 的 bounding rect 定位文字，补偿量经像素
+       * 比对与原生渲染一致）。仅用于栅格化；确认弹窗里的预览走浏览器原生渲染，
+       * 不需要补偿，因此不在此处处理。
+       */
+      function compensateReportTextBaseline(root) {
+        const doc = root.ownerDocument || document;
+        root.querySelectorAll('table td, table th').forEach((cell) => {
+          Array.prototype.slice.call(cell.childNodes).forEach((node) => {
+            if (node.nodeType === 3 && node.nodeValue && node.nodeValue.trim()) {
+              const span = doc.createElement('span');
+              span.style.cssText = 'position:relative;top:-8px;';
+              span.textContent = node.nodeValue;
+              cell.replaceChild(span, node);
+            }
+          });
+        });
+      }
+
       function createReportSandbox(html) {
         const iframe = document.createElement('iframe');
         iframe.setAttribute('aria-hidden', 'true');
@@ -676,6 +700,8 @@
             document.body.appendChild(container);
           }
           const root = sandbox ? sandbox.holder : container;
+          // 栅格化前修正 html2canvas 的表格文字基线（原生渲染的弹窗预览不需要）
+          compensateReportTextBaseline(root);
           const reportPages = root.querySelectorAll('.expenseReportPage');
           const { jsPDF } = window.jspdf;
           const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4', compress: true });
