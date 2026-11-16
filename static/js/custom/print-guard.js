@@ -20,26 +20,14 @@
       : (node.closest && node.closest("button, a, [role='button'], [data-slot='button']")) || null;
   }
 
-  let lastPdfUrl = null;
+  // URL.createObjectURL 已由 main-bootstrap.js 统一补丁并写入
+  // window.__lastPdfBlobUrl；这里不再重复 monkey-patch 全局 API。
   function setLastPdfUrl(url) {
-    if (!url) return;
-    lastPdfUrl = url;
+    if (url) window.__lastPdfBlobUrl = url;
   }
-
-  const originalCreateObjectURL = URL.createObjectURL;
-  URL.createObjectURL = function () {
-    try {
-      const obj = arguments[0];
-      const type = (obj && obj.type) || '';
-      const url = originalCreateObjectURL.apply(URL, arguments);
-      if (type.includes('pdf') || /\.pdf(\?|$)/i.test(url)) {
-        setLastPdfUrl(url);
-      }
-      return url;
-    } catch (e) {
-      return originalCreateObjectURL.apply(URL, arguments);
-    }
-  };
+  function currentPdfUrl() {
+    return window.__mergedPdfBlobUrl || window.__lastPdfBlobUrl || null;
+  }
 
   const originalFetch = window.fetch;
   window.fetch = async function () {
@@ -126,13 +114,12 @@
         ev.preventDefault();
         ev.stopPropagation();
         try {
-          let url = window.__mergedPdfBlobUrl;
+          let url = currentPdfUrl();
           if (!url) {
             const deadline = Date.now() + 8000;
-            url = lastPdfUrl;
             while (!url && Date.now() < deadline) {
               scanForPdfLinks();
-              url = lastPdfUrl;
+              url = currentPdfUrl();
               if (url) break;
               await new Promise((r) => setTimeout(r, 400));
             }
@@ -148,15 +135,8 @@
     true
   );
 
-  // 只对「打印」类提示自动确认。原实现一律 return true，会让清空、删除等
-  // 任何二次确认被静默放行（全局副作用）；其余情况必须交回浏览器原生实现。
-  const originalConfirmGlobal = window.confirm;
-  const autoConfirmPatterns = [/打印/, /print/i];
-  window.confirm = function (message) {
-    const text = String(message == null ? '' : message);
-    if (autoConfirmPatterns.some((p) => p.test(text))) return true;
-    return originalConfirmGlobal.apply(window, arguments);
-  };
+  // 不再劫持 window.confirm：任何「含打印字样就自动 true」的全局补丁，
+  // 都可能把「打印并删除…」这类真正的二次确认一起放行。
 
   scanForPdfLinks();
   const mo = new MutationObserver((mutations) => {

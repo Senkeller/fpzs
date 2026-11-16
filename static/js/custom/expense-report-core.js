@@ -29,14 +29,16 @@
     var m;
     while ((m = dateRe.exec(fullText || '')) !== null) {
       var y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
-      if (y < 2015 || y > 2035 || mo < 1 || mo > 12 || d < 1 || d > 31) continue;
+      var maxDay = (y >= 2015 && y <= 2035 && mo >= 1 && mo <= 12) ? new Date(y, mo, 0).getDate() : 0;
+      if (y < 2015 || y > 2035 || mo < 1 || mo > 12 || d < 1 || d > maxDay) continue;
       var iso = y + '-' + pad2(mo) + '-' + pad2(d);
       if (dates.indexOf(iso) === -1) dates.push(iso);
     }
     var prefRe = /(?:用车时间|行程时间|行程起止日期|出发时间|上车时间|服务时间|乘车日期|行程日期|用车日期|订单时间)\s*[:：]?\s*(20\d{2})\s*[年\-/.]\s*(\d{1,2})\s*[月\-/.]\s*(\d{1,2})/g;
     while ((m = prefRe.exec(fullText || '')) !== null) {
       var py = parseInt(m[1], 10), pm = parseInt(m[2], 10), pd = parseInt(m[3], 10);
-      if (pm >= 1 && pm <= 12 && pd >= 1 && pd <= 31) {
+      var pmax = (py >= 2015 && py <= 2035 && pm >= 1 && pm <= 12) ? new Date(py, pm, 0).getDate() : 0;
+      if (pm >= 1 && pm <= 12 && pd >= 1 && pd <= pmax) {
         var piso = py + '-' + pad2(pm) + '-' + pad2(pd);
         if (preferred.indexOf(piso) === -1) preferred.push(piso);
       }

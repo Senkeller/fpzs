@@ -8,6 +8,7 @@
  */
 
 const path = require('path');
+const fs = require('fs');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -62,11 +63,19 @@ function toAsset(url) {
   return norm;
 }
 
-/** 把相对路径解析到 root 内；越界返回 null（含符号链接无法覆盖的边界检查） */
+/** 把相对路径解析到 root 内越界返回 null；同时解析符号链接，防止目录内链接指到外部 */
 function resolveSafe(root, rel) {
   const base = path.resolve(root);
   const full = path.resolve(base, rel);
   if (full !== base && !full.startsWith(base + path.sep)) return null;
+  // path.resolve 只做字符串归一化，不解析符号链接。
+  try {
+    const realBase = fs.realpathSync(base);
+    const realFull = fs.realpathSync(full);
+    if (realFull !== realBase && !realFull.startsWith(realBase + path.sep)) return null;
+  } catch (e) {
+    return null; // 文件不存在或断链：交给调用方按 404 处理
+  }
   return full;
 }
 

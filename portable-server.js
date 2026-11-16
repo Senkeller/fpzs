@@ -13,6 +13,7 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { exec } = require('child_process');
 const { MIME, FALLBACK_PAGE, legacyRedirect, toAsset, resolveSafe } = require('./safe-path.js');
 
@@ -25,6 +26,10 @@ process.title = '发票打印助手';
 // 单实例自检用的健康端点（不参与资源服务，不会被真实文件覆盖）
 const HEALTH_PATH = '/__healthz';
 const HEALTH_BODY = 'invoice-print-helper-ok';
+
+// 退出端点必须带一次性 token（随启动横幅打印）。
+// 仅绑定 127.0.0.1 并不足以防止本地网页通过 <img>/fetch 偷偷关停服务。
+const QUIT_TOKEN = crypto.randomBytes(6).toString('hex');
 
 function readAsset(rel) {
   if (IS_SEA) {
@@ -69,13 +74,19 @@ const server = http.createServer((req, res) => {
     const legacy = legacyRedirect(url);
     if (legacy) return redirect(res, 301, legacy);
 
+    const pathname = url.split('?')[0].split('#')[0];
+
     // 单实例自检端点：仅本程序会返回固定串，用于探测端口是否已被本程序占用
-    if (url === HEALTH_PATH) {
+    if (pathname === HEALTH_PATH) {
       return send(res, 200, 'text/plain; charset=utf-8', Buffer.from(HEALTH_BODY, 'utf8'));
     }
 
-    // 优雅退出端点：无黑窗口（GUI 子系统）模式下也能关掉服务
-    if (url === '/__quit') {
+    // 优雅退出端点：必须带本次启动随机生成的 token，避免任意网页悄悄关停服务
+    if (pathname === '/__quit') {
+      const params = new URLSearchParams(url.split('?')[1] || '');
+      if (params.get('token') !== QUIT_TOKEN) {
+        return send(res, 403, 'text/plain; charset=utf-8', Buffer.from('Forbidden: invalid quit token', 'utf8'));
+      }
       send(res, 200, 'text/plain; charset=utf-8', Buffer.from('正在退出…', 'utf8'));
       setImmediate(() => process.exit(0));
       return;
@@ -139,7 +150,7 @@ function printBanner(port) {
   console.log(rule);
   console.log('  ' + G + '打开浏览器 : ' + R + url);
   console.log('  ' + G + '资源来源   : ' + R + (IS_SEA ? '已内嵌于 exe（无需安装、无需联网）' : ROOT));
-  console.log('  ' + Y + '退出方式   : ' + R + '关闭本窗口，或访问 ' + url + '__quit');
+  console.log('  ' + Y + '退出方式   : ' + R + '关闭本窗口，或访问 ' + url + '__quit?token=' + QUIT_TOKEN);
   console.log(rule);
   console.log('');
   return url;
@@ -173,13 +184,21 @@ function startServer(port) {
 // 探测 BASE_PORT 是否已被「本程序」占用（靠健康端点的固定返回串识别，
 // 避免误判别的程序恰好占了 8000）。命中则视为已有实例在跑。
 function probeExistingInstance(port, cb) {
+  // timeout / error / end 可能并发触发；没有 once 保护时 startServer 会被调用两次，
+  // 第二次 listen 会直接抛 ERR_SERVER_ALREADY_LISTEN。
+  let done = false;
+  const finish = (isOurs) => {
+    if (done) return;
+    done = true;
+    cb(isOurs);
+  };
   const req = http.get({ host: '127.0.0.1', port: port, path: HEALTH_PATH, timeout: 800 }, (res) => {
     let data = '';
     res.on('data', (c) => { data += c; });
-    res.on('end', () => cb(data.trim() === HEALTH_BODY));
+    res.on('end', () => finish(data.trim() === HEALTH_BODY));
   });
-  req.on('error', () => cb(false));
-  req.on('timeout', () => { req.destroy(); cb(false); });
+  req.on('error', () => finish(false));
+  req.on('timeout', () => { req.destroy(); finish(false); });
 }
 
 if (SINGLE_INSTANCE) {

@@ -57,13 +57,18 @@ const REAL = [
 
 console.log('\n=== A. 真实文件清单核对（匿名指纹，不含文件名明文） ===');
 const dir = path.join(__dirname, '2026-9 南宁');
-const onDisk = fs.existsSync(dir) ? fs.readdirSync(dir).filter(f => /\.pdf$/i.test(f)).sort() : [];
-const sizeFingerprint = onDisk.map(f => fs.statSync(path.join(dir, f)).size).sort((a, b) => a - b);
-const EXPECTED_SIZES = [38219, 60297, 72694, 74357, 175092, 475007, 476119];
-check('真实 PDF 目录存在且共 7 份', onDisk.length === 7, '实际 ' + onDisk.length + ' 份');
-check('磁盘票据与 fixture 对应（按文件体积指纹）',
-  JSON.stringify(sizeFingerprint) === JSON.stringify(EXPECTED_SIZES),
-  onDisk.length ? sizeFingerprint.join(',') : '目录不存在');
+if (!fs.existsSync(dir)) {
+  // 该目录被 .gitignore 排除；fresh clone 不应让 npm test 直接失败。
+  console.log('  SKIP  真实票据目录不存在，跳过磁盘指纹核对；下方基于 fixture 的业务断言仍全部执行');
+} else {
+  const onDisk = fs.readdirSync(dir).filter(f => /\.pdf$/i.test(f)).sort();
+  const sizeFingerprint = onDisk.map(f => fs.statSync(path.join(dir, f)).size).sort((a, b) => a - b);
+  const EXPECTED_SIZES = [38219, 60297, 72694, 74357, 175092, 475007, 476119];
+  check('真实 PDF 目录存在且共 7 份', onDisk.length === 7, '实际 ' + onDisk.length + ' 份');
+  check('磁盘票据与 fixture 对应（按文件体积指纹）',
+    JSON.stringify(sizeFingerprint) === JSON.stringify(EXPECTED_SIZES),
+    onDisk.length ? sizeFingerprint.join(',') : '目录不存在');
+}
 
 console.log('\n=== B. 出差范围 2026-09-06 ~ 09-11（南宁，补贴 50/天）===');
 // 出差人 / 表单编号使用占位值，不把真实个人信息固化进测试脚本

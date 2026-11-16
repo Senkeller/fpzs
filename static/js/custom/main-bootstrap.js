@@ -61,22 +61,34 @@
 
       window.__invoiceDataCache = window.__invoiceDataCache || {};
 
+      // 与 file-copy-print.js 共用同一套文件键口径：同名文件不再互相覆盖。
+      const fileKeyOf = (file) => (window.__fileKey ? window.__fileKey(file) : (file && file.name) || '');
+      function findFileKeyByName(name) {
+        const cache = window.__fileDebugCache;
+        if (!cache || !name) return null;
+        for (const [key, file] of cache.entries()) {
+          if (file && file.name === name) return key;
+        }
+        return null;
+      }
+
       function initFileProxy() {
         if (!window.__fileDebugCache) {
           setTimeout(initFileProxy, 600);
           return;
         }
 
-        for (const [name, file] of window.__fileDebugCache.entries()) {
+        for (const [key, file] of window.__fileDebugCache.entries()) {
+          const name = file && file.name || '';
           if (
             name.toLowerCase().endsWith('.pdf') &&
             !name.includes('_副本') &&
             !/^报销单[_-]|^报销单\.pdf$/i.test(name) &&
             !name.startsWith('000_')
           ) {
-            if (!window.__invoiceDataCache[name]) {
+            if (!window.__invoiceDataCache[key]) {
               extractInvoiceDataFromPdf(name, file).then((d) => {
-                window.__invoiceDataCache[name] = d;
+                window.__invoiceDataCache[key] = d;
                 if (typeof refreshStatsCard === 'function') refreshStatsCard();
               });
             }
@@ -85,17 +97,19 @@
 
         const origSet = Map.prototype.set;
         window.__fileDebugCache.set = function (key, value) {
-          const result = origSet.call(this, key, value);
+          // 忽略调用方传来的文件名 key，统一按文件指纹归一化。
+          const fileKey = fileKeyOf(value);
+          const name = (value && value.name) || '';
+          const result = origSet.call(this, fileKey, value);
           if (
-            key &&
-            key.toLowerCase().endsWith('.pdf') &&
-            !key.includes('_副本') &&
-            !/^报销单[_-]|^报销单\.pdf$/i.test(key) &&
-            !key.startsWith('000_')
+            name.toLowerCase().endsWith('.pdf') &&
+            !name.includes('_副本') &&
+            !/^报销单[_-]|^报销单\.pdf$/i.test(name) &&
+            !name.startsWith('000_')
           ) {
-            extractInvoiceDataFromPdf(key, value).then((d) => {
-              window.__invoiceDataCache[key] = d;
-              console.log('✅ 自动识别完成:', key, '¥' + d.amount);
+            extractInvoiceDataFromPdf(name, value).then((d) => {
+              window.__invoiceDataCache[fileKey] = d;
+              console.log('✅ 自动识别完成:', name, '¥' + d.amount);
               if (typeof refreshStatsCard === 'function') refreshStatsCard();
             });
           }
@@ -185,7 +199,8 @@
             } catch (e) { /* ignore */ }
           });
           obs.observe(document.body, { childList: true, subtree: true });
-          setTimeout(() => obs.disconnect(), 600000); // 10 分钟后释放
+          // 不要按时间自断：页面开着超过 10 分钟后 React 重渲染会把统计卡片
+          // 恢复成「行程单也算发票」的错误口径，而那时已经没人再修正它。
           refreshStatsCard();
         };
         tryStart();
@@ -264,12 +279,13 @@
               if (window.__fileDebugCache) {
                 const pending = [];
                 for (const inv of stats.invoices) {
-                  if (inv.fileName && !cache[inv.fileName]) {
-                    const file = window.__fileDebugCache.get(inv.fileName);
+                  const fileKey = findFileKeyByName(inv.fileName);
+                  if (fileKey && !cache[fileKey]) {
+                    const file = window.__fileDebugCache.get(fileKey);
                     if (file) {
                       pending.push(
                         extractInvoiceDataFromPdf(inv.fileName, file).then((d) => {
-                          window.__invoiceDataCache[inv.fileName] = d;
+                          window.__invoiceDataCache[fileKey] = d;
                         })
                       );
                     }
@@ -281,7 +297,7 @@
               const freshCache = window.__invoiceDataCache || {};
               const statsTotal = stats.totalAmount ?? stats.total ?? stats.amount ?? null;
               invoices = stats.invoices.map((inv) => {
-                const cached = freshCache[inv.fileName] || {};
+                const cached = freshCache[findFileKeyByName(inv.fileName)] || {};
 
                 const reactAmount = typeof inv.total === 'number' ? inv.total / 100 : null;
                 const amount = reactAmount ?? cached.amount ?? 0;
@@ -334,17 +350,18 @@
 
         if (window.__fileDebugCache && window.__fileDebugCache.size > 0) {
           const pending = [];
-          for (const [name, file] of window.__fileDebugCache.entries()) {
+          for (const [key, file] of window.__fileDebugCache.entries()) {
+            const name = file && file.name || '';
             if (
               name.toLowerCase().endsWith('.pdf') &&
               !name.includes('_副本') &&
               !/^报销单[_-]|^报销单\.pdf$/i.test(name) &&
               !name.startsWith('000_')
             ) {
-              if (!window.__invoiceDataCache[name]) {
+              if (!window.__invoiceDataCache[key]) {
                 pending.push(
                   extractInvoiceDataFromPdf(name, file).then((d) => {
-                    window.__invoiceDataCache[name] = d;
+                    window.__invoiceDataCache[key] = d;
                   })
                 );
               }
@@ -375,7 +392,8 @@
             };
           }
 
-          for (const [name] of window.__fileDebugCache.entries()) {
+          for (const [, file] of window.__fileDebugCache.entries()) {
+            const name = file && file.name || '';
             if (
               name.toLowerCase().endsWith('.pdf') &&
               !name.includes('_副本') &&
@@ -600,11 +618,12 @@
         if (!window.__fileDebugCache || window.__fileDebugCache.size === 0) return;
         const cache = window.__invoiceDataCache || {};
         const rePending = [];
-        for (const [name, file] of window.__fileDebugCache.entries()) {
+        for (const [key, file] of window.__fileDebugCache.entries()) {
+          const name = file && file.name || '';
           if (name.toLowerCase().endsWith('.pdf') &&
             !name.includes('_副本') && !/^报销单[_-]|^报销单\.pdf$/i.test(name) && !name.startsWith('000_') &&
-            !cache[name]) {
-            rePending.push(extractInvoiceDataFromPdf(name, file).then(d => { window.__invoiceDataCache[name] = d; }));
+            !cache[key]) {
+            rePending.push(extractInvoiceDataFromPdf(name, file).then(d => { window.__invoiceDataCache[key] = d; }));
           }
         }
         if (rePending.length > 0) await Promise.all(rePending);
@@ -1135,7 +1154,8 @@
       async function getInvoicePdfFiles() {
         const pdfFiles = [];
         if (!window.__fileDebugCache || window.__fileDebugCache.size === 0) return pdfFiles;
-        for (const [name, file] of window.__fileDebugCache.entries()) {
+        for (const [, file] of window.__fileDebugCache.entries()) {
+          const name = file && file.name || '';
           if (name.toLowerCase().endsWith('.pdf') &&
             !name.includes('_副本') && !/^报销单[_-]|^报销单\.pdf$/i.test(name) && !name.startsWith('000_')) {
             try { pdfFiles.push(await file.arrayBuffer()); } catch (e) { console.error('加载PDF失败:', name, e); }
@@ -2191,16 +2211,8 @@
           const file = new File([blob], fileName, { type: 'application/pdf' });
 
           if (window.__fileDebugCache) {
-
-            const tempCache = new Map();
-            tempCache.set(fileName, file);
-
-            for (const [key, value] of window.__fileDebugCache.entries()) {
-              tempCache.set(key, value);
-            }
-
-            window.__fileDebugCache = tempCache;
-
+            // 直接写入原 Map：替换整个 Map 会丢掉 initFileProxy 挂上的 set 钩子。
+            window.__fileDebugCache.set(fileKeyOf(file), file);
           }
 
           const fileInput = document.querySelector('input[type="file"]');
@@ -2237,7 +2249,8 @@
         if (window.__fileDebugCache && window.__fileDebugCache.size > 0) {
           console.log('📦 [legacy] 从缓存中获取PDF文件,缓存大小:', window.__fileDebugCache.size);
 
-          for (const [fileName, file] of window.__fileDebugCache.entries()) {
+          for (const [, file] of window.__fileDebugCache.entries()) {
+            const fileName = file && file.name || '';
             console.log('检查文件:', fileName);
 
             if (fileName.toLowerCase().endsWith('.pdf') &&

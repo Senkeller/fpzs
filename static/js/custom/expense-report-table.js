@@ -81,7 +81,9 @@
     var m = String(v).trim().match(/(20\d{2})\s*[-/年.]\s*(\d{1,2})\s*[-/月.]\s*(\d{1,2})/);
     if (!m) return null;
     var y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
-    if (y < 2015 || y > 2035 || mo < 1 || mo > 12 || d < 1 || d > 31) return null;
+    // 只允许月内真实天数：2 月 31 日会被 JS 静默滚到 3 月，导致报销归行日期错误。
+    var maxDay = (y >= 2015 && y <= 2035 && mo >= 1 && mo <= 12) ? new Date(y, mo, 0).getDate() : 0;
+    if (y < 2015 || y > 2035 || mo < 1 || mo > 12 || d < 1 || d > maxDay) return null;
     return new Date(y, mo - 1, d);
   }
 

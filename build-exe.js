@@ -107,7 +107,9 @@ const needInstall = !fs.existsSync(cli)
   || !fs.existsSync(path.join(BUILD, 'node_modules', 'png-to-ico', 'index.js'));
 if (needInstall) {
   console.log('Installing build-time deps (postject, resedit, png-to-ico) ...');
-  cp.execSync('npm install --prefix "' + BUILD + '" postject resedit png-to-ico --no-audit --no-fund --loglevel=error',
+  // 锁定版本：SEA/PE 注入对依赖内部结构敏感，裸版本号会让同一份源码明天就构建失败。
+  const BUILD_DEPS = 'postject@1.0.0-alpha.6 resedit@3.1.0 png-to-ico@3.0.2';
+  cp.execSync('npm install --prefix "' + BUILD + '" ' + BUILD_DEPS + ' --save-exact --no-audit --no-fund --loglevel=error',
     { cwd: ROOT, stdio: 'inherit' });
 }
 if (!fs.existsSync(cli)) throw new Error('postject 安装失败：' + cli);
@@ -123,4 +125,4 @@ cp.execFileSync(process.execPath, metaArgs, { cwd: ROOT, stdio: 'inherit' });
 console.log('');
 console.log('DONE: ' + EXE + '  (' + (fs.statSync(EXE).size / 1024 / 1024).toFixed(2) + ' MiB)');
 console.log('Double-click it, or run:  set NO_BROWSER=1 && "' + EXE + '"');
-if (process.env.GUI) console.log('GUI 模式已启用：双击无黑窗口，退出请访问 http://127.0.0.1:8000/__quit');
+if (process.env.GUI) console.log('GUI 模式已启用：双击无黑窗口，退出请访问启动横幅里打印的带 token 的 __quit 地址');

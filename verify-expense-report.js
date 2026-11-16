@@ -225,7 +225,7 @@ check('报销单在离屏沙箱里栅格化（主文档 980 条全局 CSS 会让
 check('报销单图片走 JPEG 直传（跳过多 MB 的 base64 与二次 deflate）',
   mainHtml.includes("toBlob(res, 'image/jpeg'") && mainHtml.includes("'JPEG'"));
 check('重识别改为增量（跳过已识别 PDF，避免反复生成全量重解析）',
-  mainHtml.includes('!cache[name])') && mainHtml.includes('refreshInvoiceRecognition'));
+  /!cache\[(?:name|key)\]\)/.test(mainHtml) && mainHtml.includes('refreshInvoiceRecognition'));
 
 /* ---------- 6. 输出静态预览 ---------- */
 const previewDir = path.join(__dirname, '.workbuddy', 'preview');
