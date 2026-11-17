@@ -252,6 +252,9 @@
   document.addEventListener('click', function (e) {
     const button = e.target.closest('button');
     if (!button) return;
+    // 报销单卡片里的「打印」自己管打印目标（只打报销单那份 blob），
+    // 这里要是抢了就会变成打印顶部的合并发票。
+    if (button.hasAttribute('data-er-print')) return;
     const text = button.textContent || button.innerText || '';
     if (text.includes('打印') || text.includes('Print') || text.includes('下载') || text.includes('Download') || text.includes('合并')) {
       if (!text.includes('打印') && !text.includes('Print')) {

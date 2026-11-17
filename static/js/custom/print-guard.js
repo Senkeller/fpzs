@@ -108,6 +108,9 @@
       const isHeader = btn && (btn.closest('header') || btn.tagName === 'H1' || btn.tagName === 'H2' || btn.tagName === 'H3');
       if (isHeader) return;
 
+      // 报销单卡片的打印按钮有自己的目标 PDF，别被这里的「找当前 PDF」逻辑劫走
+      if (btn && btn.hasAttribute('data-er-print')) return;
+
       if (btn && textIncludes(btn, downloadKeywords)) return;
 
       if (btn && textIncludes(btn, printKeywords)) {

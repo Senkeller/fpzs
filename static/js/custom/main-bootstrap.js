@@ -725,6 +725,9 @@
       function saveExpenseReportOverrides(invoiceData) {
         const ov = {};
         (invoiceData || []).forEach((inv, idx) => {
+          // 手动补录的票不在 overrides 里：它自己存在 __manualReceipts，
+          // 混进来会留下一堆 fileName 为空的键，下次匹配反而容易张冠李戴。
+          if (inv && inv.__manual) return;
           ov[expenseOverrideKey(inv, idx)] = {
             projectName: inv.projectName, itemName: inv.itemName, amount: inv.amount,
             amountConfirmed: !!inv.__amountConfirmed,
@@ -735,6 +738,29 @@
           };
         });
         window.__expenseReportOverrides = ov;
+      }
+
+      // ------------------------------------------------------------------
+      // 手动补录的纸质票据存这里，和文件识别缓存完全分开：
+      //   · 没有对应文件，去重/识别/行程配组都不该碰它
+      //   · 只在本页会话内保留（与人工修正 overrides 同一策略），刷新即清空
+      //   · 每条有稳定 id，增删不影响别的条目
+      // ------------------------------------------------------------------
+      function loadManualReceipts() {
+        return Array.isArray(window.__manualReceipts) ? window.__manualReceipts.slice() : [];
+      }
+
+      function saveManualReceipts(list) {
+        window.__manualReceipts = (list || []).slice();
+      }
+
+      function nextManualId() {
+        let max = 0;
+        loadManualReceipts().forEach((r) => {
+          const n = parseInt(String((r && r.id) || '').replace(/\D/g, ''), 10);
+          if (isFinite(n) && n > max) max = n;
+        });
+        return 'm' + (max + 1);
       }
 
       function assertReportLibs() {
@@ -919,8 +945,12 @@
           const data = await getInvoiceDataFromApp();
           const invoiceData = Array.isArray(data) ? data : (data.invoices || []);
           if (!invoiceData || invoiceData.length === 0) {
-            alert('❌ 请先上传发票文件\n\n提示：上传后稍等片刻，系统会自动识别发票信息。');
-            return false;
+            // 一张上传的票都没有时也允许出单——只要之前手动补录过实体票，
+            // 「这趟全是纸质票」是合法场景，不该被「请先上传发票」挡在门外。
+            if (!loadManualReceipts().length) {
+              alert('❌ 请先上传发票文件，或点「＋ 手动补录」添加一张纸质票\n\n提示：上传后稍等片刻，系统会自动识别发票信息。');
+              return false;
+            }
           }
           const totalAmountFromStats = (data && data.totalAmount != null) ? data.totalAmount : null;
           applyExpenseReportOverrides(invoiceData);
@@ -938,7 +968,7 @@
           const reportPdfBytes = await renderExpenseReportPdf(confirmedData, totalAmountFromStats);
           await mergeReportWithInvoicesForPreview(reportPdfBytes, confirmedData);
           console.log('⏱️ 生成总耗时:', Math.round(perfNow() - tGen) + 'ms');
-          showSuccessNotification('✅ 报销单已确认并生成！请在右侧预览窗口查看，可直接下载打印。');
+          showSuccessNotification('✅ 报销单已确认并生成！预览在右侧，下方卡片可直接「打印」或「下载」。');
           return true;
         } catch (error) {
           console.error('❌ 生成报销单失败:', error);
@@ -966,9 +996,14 @@
           if (!api) { alert('❌ 差旅报销单模块未加载'); resolve(false); return; }
 
           // 副本操作：取消即丢弃，不污染 React / 识别缓存里的原始数据
-          const draft = invoiceData.map(inv => Object.assign({}, inv, {
+          const baseDraft = invoiceData.map(inv => Object.assign({}, inv, {
             trip: inv.trip ? Object.assign({}, inv.trip) : null
           }));
+          // 手动补录的纸质票追加在最后：原票据索引不变（cellSources / overrides 都按索引取值），
+          // 它们也不进识别缓存，只在本次生成的草稿里作为普通发票参与填表。
+          const draft = baseDraft.concat(
+            loadManualReceipts().map(r => api.utils.manualReceipt(r, readTripConfigFromUI().startDate))
+          );
           const cfg = Object.assign({}, readTripConfigFromUI());
           let settled = false;
           let currentIssues = [];
@@ -978,6 +1013,9 @@
           // 不该因为改了一张票的日期而被弹回「待处理」。
           let sideTabPinned = false;
           let activeCell = null;
+          // 手动补录表单：null = 收起。表单值放这里而不是直接读 DOM，
+          // 这样 refresh() 重绘侧栏时用户正在敲的数不会丢。
+          let manualForm = null;
 
           const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
             '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
@@ -1004,6 +1042,14 @@
 
           function catSelectHTML(inv, i) {
             if (inv.isTrip) return '<span class="erc-muted">仅核对日期/金额</span>';
+            // 手动补录的票没有票面可认，不存在「自动识别」这一档：类别就是用户选的那个。
+            if (inv.__manual) {
+              const list = api.SELECTABLE_CATS || [];
+              return `<select class="erc-input erc-cat is-manual" data-idx="${i}" title="选择这条手动记录填入的费用列">
+                ${list.map(k =>
+                  `<option value="${k}" ${inv.__reportCategory === k ? 'selected' : ''}>${esc(api.COL_LABEL[k] || k)}</option>`).join('')}
+              </select>`;
+            }
             const catList = api.SELECTABLE_CATS || ['ticket', 'taxi', 'transportOther', 'lodging', 'refund'];
             const manualCat = !!inv.__reportCategory;
             // 自动识别那一档要忽略人工指定再算一次，否则选完就显示成「自动识别（普票费）」
@@ -1027,6 +1073,107 @@
           //   · 金额：单张发票只在行内出现一次，≥2 张时标题带才额外给出合计
           //   · 行程单：张数/日期集中在凭证条，标题副行不再重复「N 张行程单」
           //   · 「已入表」等常态状态不占行，只有需要动作（超范围/已移出）才出状态行
+          // ---- 手动补录纸质票 ----
+          // 场景：手上是实体票、没上传 PDF，但报销清单必须体现这笔钱。
+          // 只让人填「金额 + 费用列 + 归行日期（+可选说明）」，其余全按普通发票走。
+          function pad2(n) { return String(n).padStart(2, '0'); }
+
+          // 默认日期：今天；今天在区间外就夹到区间里（默认值不该一上来就「超范围」）
+          function defaultManualDate() {
+            const s = currentAnalysis && currentAnalysis.start;
+            const e = currentAnalysis && currentAnalysis.end;
+            const t = new Date();
+            let d = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+            if (s && d < s) d = s;
+            if (e && d > e) d = e;
+            return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate());
+          }
+
+          // 草稿里的手动条目回写到 window.__manualReceipts：增删改都在这里同步，
+          // 关掉弹窗（哪怕取消）后再点生成，补录的票还在。
+          function syncManualReceipts() {
+            const list = [];
+            draft.forEach((inv) => {
+              if (!inv || !inv.__manual) return;
+              list.push({
+                id: inv.__manualId || '',
+                amount: inv.amount,
+                category: inv.__reportCategory || 'ticket',
+                date: inv.__reportDate || '',
+                name: inv.projectName || '',
+                excluded: !!inv.__reportExcluded
+              });
+            });
+            saveManualReceipts(list);
+          }
+
+          function openManualForm(preset) {
+            const cats = api.SELECTABLE_CATS || [];
+            const cat = preset && cats.indexOf(preset.cat) !== -1 ? preset.cat : 'ticket';
+            manualForm = {
+              amount: '',
+              cat: cat,
+              date: (preset && /^\d{4}-\d{2}-\d{2}$/.test(preset.date || '')) ? preset.date : defaultManualDate(),
+              name: ''
+            };
+            renderSide();
+            sideList.scrollTop = 0;
+            const box = sideList.querySelector('[data-manual-field="amount"]');
+            if (box) box.focus();
+          }
+
+          function addManualReceipt() {
+            if (!manualForm) return;
+            const amt = parseFloat(String(manualForm.amount).replace(/[^\d.]/g, ''));
+            const box = sideList.querySelector('[data-manual-field="amount"]');
+            if (!isFinite(amt) || amt <= 0) {
+              // 不弹 alert：正在填表时被打断最烦。让金额框自身变红说明问题。
+              if (box) { box.style.borderColor = '#dc2626'; box.style.background = '#fef2f2'; box.focus(); }
+              return;
+            }
+            const rec = api.utils.manualReceipt({
+              id: nextManualId(), amount: amt, category: manualForm.cat,
+              date: manualForm.date, name: manualForm.name
+            }, defaultManualDate());
+            draft.push(rec);
+            manualForm = null;
+            refresh();
+            // 新卡片可能排在列表末尾，滚过去并高亮一下，否则用户以为没加上
+            const card = sideList.querySelector('.erc-inv-row[data-idx="' + (draft.length - 1) + '"]');
+            if (card) {
+              card.scrollIntoView({ block: 'center' });
+              card.classList.add('is-selected');
+              setTimeout(() => card.classList.remove('is-selected'), 1600);
+            }
+          }
+
+          function manualFormHTML() {
+            if (!manualForm) return '';
+            const cats = api.SELECTABLE_CATS || [];
+            const opts = cats.map(k =>
+              `<option value="${k}" ${manualForm.cat === k ? 'selected' : ''}>${esc(api.COL_LABEL[k] || k)}</option>`).join('');
+            return `<div class="erc-manual-form">
+              <div class="erc-manual-form-title">手动补录纸质发票<span>没上传文件的实体票在这里补，金额与日期由你填</span></div>
+              <div class="erc-field-row">
+                <div class="erc-field"><span>金额</span>
+                  <input class="erc-input" data-manual-field="amount" type="number" step="0.01" min="0"
+                    placeholder="0.00" value="${esc(manualForm.amount)}"></div>
+                <div class="erc-field"><span>填入位置</span>
+                  <select class="erc-input" data-manual-field="cat">${opts}</select></div>
+              </div>
+              <div class="erc-field"><span>归行日期</span>
+                <input class="erc-input" data-manual-field="date" type="date" value="${esc(manualForm.date)}"></div>
+              <div class="erc-field"><span>说明（可选）</span>
+                <input class="erc-input" data-manual-field="name" type="text" maxlength="40"
+                  placeholder="如：南宁—北京 高铁票" value="${esc(manualForm.name)}"></div>
+              <div class="erc-manual-actions">
+                <button type="button" class="erc-manual-add" data-manual-add>添加这张票</button>
+                <button type="button" class="erc-manual-cancel" data-manual-cancel>取消</button>
+                <span class="erc-muted">金额框里按回车也能添加</span>
+              </div>
+            </div>`;
+          }
+
           function groupCardHTML(g, analysis, badSet) {
             const orphan = g.type === 'orphanTrip';
             const cat = g.category;
@@ -1063,7 +1210,9 @@
             const noTripBy = (function () {
               const src = (g.invoice && g.invoice.dateSource) ||
                 ((draft[g.invoiceIndices[0]] || {}).dateSource);
-              return src === 'stay' ? '按入住日归行' : src === 'travel' ? '按出行日归行' : '按开票日期归行';
+              return src === 'stay' ? '按入住日归行'
+                : src === 'travel' ? '按出行日归行'
+                : src === 'manual' ? '手动指定日期' : '按开票日期归行';
             })();
             const tripBar = tripCount
               ? `<div class="erc-trip-bar" style="background:#fff;border-color:${st.border};" title="${tripNames}">
@@ -1091,11 +1240,19 @@
               const pendTag = (!inv.__reportExcluded && amtPending)
                 ? `<span class="erc-pend-tag erc-pend-amount" title="金额是按票面文字推测的，或两个来源对不上；核对票面「价税合计」后可直接改">金额待核</span>`
                 : '';
-              const foot = inv.__reportExcluded
-                ? `<div class="erc-inv-foot"><span class="erc-muted" style="color:#64748b;">已移出 · 拖回表格恢复</span></div>`
+              // 手动补录的票：标签说明它不是识别出来的，删除是彻底删掉这条记录
+              // （和「移出表格」不同——移出只是不计入，还能拖回来）。
+              const manualFoot = inv.__manual
+                ? `<span class="erc-manual-tag" title="手动补录：不对应已上传的文件">手动</span>` +
+                  `<button type="button" class="erc-manual-del" data-manual-del="${i}" title="删除这条手动记录">删除</button>`
+                : '';
+              const footHead = inv.__reportExcluded
+                ? `<span class="erc-muted" style="color:#64748b;">已移出 · 拖回表格恢复</span>`
                 : (isBad
-                  ? `<div class="erc-inv-foot"><select class="erc-input erc-quick" data-idx="${i}" title="放入出差日期"><option value="">⚠ 超范围 · 选择出差日期…</option>${dayOptionsHTML(analysis)}</select>${pendTag}</div>`
-                  : (pendTag ? `<div class="erc-inv-foot">${pendTag}</div>` : ''));
+                  ? `<select class="erc-input erc-quick" data-idx="${i}" title="放入出差日期"><option value="">⚠ 超范围 · 选择出差日期…</option>${dayOptionsHTML(analysis)}</select>`
+                  : '');
+              const foot = (footHead || pendTag || manualFoot)
+                ? `<div class="erc-inv-foot">${footHead}${pendTag}${manualFoot}</div>` : '';
               // 金额存疑的两种情形，都用金额框里的「!」提示，鼠标悬停看两个数：
               //   1) 识别结果与 React 解析器对不上（都能读到数时才有此情形）
               //   2) 票面根本没印「价税合计（小写）」，金额是按票面文字推测的
@@ -1209,6 +1366,20 @@
               .erc-pend-out{border-color:#fecaca;background:#fef2f2;color:#b91c1c;}
               .erc-pend-amount{border-color:#fde68a;background:#fffbeb;color:#b45309;}
               .erc-pend-split{border-color:#ddd6fe;background:#f5f3ff;color:#6d28d9;}
+              /* 手动补录：没有文件、只有一笔金额的实体票 */
+              .erc-manual-new{margin-left:auto;padding:5px 9px;border:1px dashed #a5b4fc;border-radius:6px;background:#eef2ff;color:#3730a3;font-size:11px;font-weight:600;cursor:pointer;}
+              .erc-manual-new:hover{background:#e0e7ff;}
+              .erc-manual-form{margin:10px 10px 0;padding:9px;border:1px solid #ddd6fe;border-radius:9px;background:#faf9ff;}
+              .erc-manual-form-title{display:flex;align-items:baseline;gap:6px;font-size:12px;font-weight:700;color:#4c1d95;margin-bottom:2px;}
+              .erc-manual-form-title span{font-weight:400;font-size:10px;color:#8b5cf6;}
+              .erc-manual-form .erc-field{margin-bottom:6px;}
+              .erc-manual-actions{display:flex;align-items:center;gap:6px;margin-top:2px;}
+              .erc-manual-add{padding:5px 12px;border:none;border-radius:6px;background:#4338ca;color:#fff;font-size:11px;font-weight:600;cursor:pointer;}
+              .erc-manual-add:hover{background:#3730a3;}
+              .erc-manual-cancel{padding:5px 10px;border:1px solid #d1d5db;border-radius:6px;background:#fff;color:#4b5563;font-size:11px;cursor:pointer;}
+              .erc-manual-tag{display:inline-flex;align-items:center;padding:0 6px;border-radius:99px;border:1px solid #ddd6fe;background:#f5f3ff;color:#6d28d9;font-size:10px;font-weight:600;white-space:nowrap;}
+              .erc-manual-del{padding:1px 7px;border:1px solid #fecaca;border-radius:6px;background:#fff;color:#b91c1c;font-size:10px;cursor:pointer;}
+              .erc-manual-del:hover{background:#fef2f2;}
               .erc-card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(248px,1fr));gap:10px;align-content:start;padding:10px;}
               .erc-group-card{border:1px solid #cbd5e1;border-left:4px solid #cbd5e1;border-radius:10px;background:#fff;padding:8px;font-size:12px;transition:box-shadow .12s,transform .12s;box-shadow:0 1px 2px rgba(15,23,42,.05);}
               .erc-group-card:hover{box-shadow:0 4px 14px rgba(15,23,42,.13);transform:translateY(-1px);}
@@ -1386,6 +1557,7 @@
                     <div class="erc-side-tabs">
                       <button type="button" data-tab="issues" class="on">待处理 <span id="erc_issue_count">0</span></button>
                       <button type="button" data-tab="all">全部票据 <span id="erc_all_count">0</span></button>
+                      <button type="button" id="erc_manual_new" class="erc-manual-new" title="手上是实体票、没有上传文件时，在这里补录一张">＋ 手动补录</button>
                     </div>
                     <div class="erc-legend" id="erc_legend"></div>
                     <div class="erc-note">行程单仅作分组依据，不计入报销金额。</div>
@@ -1560,7 +1732,7 @@
             if (allCount) allCount.textContent = String(draft.length);
             const countEl = $('erc_issue_count');
             if (countEl) countEl.textContent = String(summary.length);
-            dialog.querySelectorAll('.erc-side-tabs button').forEach(btn => {
+            dialog.querySelectorAll('.erc-side-tabs button[data-tab]').forEach(btn => {
               btn.classList.toggle('on', btn.dataset.tab === sideTab);
             });
             const badSet = new Set(currentIssues.map(x => x.index));
@@ -1573,18 +1745,18 @@
                 .filter(g => g.invoiceIndices.some(i => pendingSet.has(i)))
                 .sort((a, b) => groupLevel(b) - groupLevel(a));
               if (!badGroups.length) {
-                sideList.innerHTML = `<div class="erc-issue" style="border-color:#bbf7d0;background:#f0fdf4;">
+                sideList.innerHTML = manualFormHTML() + `<div class="erc-issue" style="border-color:#bbf7d0;background:#f0fdf4;">
                   <div style="font-size:12px;color:#166534;font-weight:700;">没有待处理票据</div>
                   <div class="erc-muted" style="margin-top:6px;">所有票据日期都在出差范围内、金额无存疑。切到「全部票据」可逐张复核。</div>
                 </div>`;
                 return;
               }
-              sideList.innerHTML = pendingStripHTML(summary) + `<div class="erc-card-grid">` +
+              sideList.innerHTML = manualFormHTML() + pendingStripHTML(summary) + `<div class="erc-card-grid">` +
                 badGroups.map(g => groupCardHTML(g, currentAnalysis, badSet)).join('') + `</div>`;
               syncRowHighlight();
               return;
             }
-            sideList.innerHTML = `<div class="erc-card-grid">` +
+            sideList.innerHTML = manualFormHTML() + `<div class="erc-card-grid">` +
               groups.map(g => groupCardHTML(g, currentAnalysis, badSet)).join('') + `</div>`;
             syncRowHighlight();
           }
@@ -1692,7 +1864,11 @@
                       <div class="erc-muted">${yuan(Math.round((parseFloat(inv.amount) || 0) * 100))}</div></div>
                     <button type="button" data-move-idx="${i}" data-move-cat="${esc(cat || api.utils.categorize(inv, cfg))}" data-move-date="${esc(rowKey === '__out__' ? '' : rowKey)}">移入</button>
                   </div>`).join('')
-                  : '<div class="erc-muted">没有可移动的票据。</div>');
+                  : '<div class="erc-muted">没有可移动的票据。</div>') +
+                // 实体票没上传时，从这一格直接补录：日期和费用列都已经带好，只填金额
+                `<div class="erc-pop-row" style="margin-top:8px;border-top:1px dashed #eef0f4;padding-top:8px;">
+                  <button type="button" data-manual-here data-cat="${esc(cat || '')}" data-date="${esc(rowKey === '__out__' ? '' : rowKey)}">＋ 补录一张纸质票到这一格</button>
+                </div>`;
             } else {
               body = popSourceRowsHTML(sources);
             }
@@ -1743,6 +1919,9 @@
           }
 
           function refresh(options) {
+            // 手动补录的改动（金额/日期/费用列/移出）先回写到持久列表，
+            // 这样哪怕直接取消弹窗，补录的票也不会丢。
+            syncManualReceipts();
             const analysis = api.analyzeExpenseReport(draft, cfg);
             currentAnalysis = analysis;
             currentIssues = analysis.issues;
@@ -1770,8 +1949,11 @@
 
             const invoiceCount = draft.filter(x => !x.isTrip).length;
             const tripCount = draft.length - invoiceCount;
+            const manualCount = draft.filter(x => x.__manual).length;
             meta.textContent = `出差人：${cfg.traveler || '未填'} · ${cfg.location || '地点未填'} · ${cfg.reason || '原因未填'} · 补贴 ${cfg.dailyAllowance} 元/天`;
-            stats.textContent = `共 ${draft.length} 项（${invoiceCount} 张发票 / ${tripCount} 张行程单） · 预览合计 ¥${(analysis.model.grandTotal / 100).toFixed(2)} · 待处理 ${pendingSummary(analysis).length} 笔` +
+            stats.textContent = `共 ${draft.length} 项（${invoiceCount} 张发票 / ${tripCount} 张行程单）` +
+              (manualCount ? `，其中手动补录 ${manualCount} 张` : '') +
+              ` · 预览合计 ¥${(analysis.model.grandTotal / 100).toFixed(2)} · 待处理 ${pendingSummary(analysis).length} 笔` +
               (currentIssues.length ? `（其中超范围 ${currentIssues.length}）` : '');
 
             const blocked = currentIssues.length > 0 && !keep.checked;
@@ -2018,6 +2200,13 @@
               }
               return;
             }
+            const manualHere = e.target.closest('[data-manual-here]');
+            if (manualHere) {
+              // 从空格子补录：日期/费用列已经带好，用户只需填金额
+              closePopover();
+              openManualForm({ cat: manualHere.dataset.cat, date: manualHere.dataset.date });
+              return;
+            }
             if (e.target.closest('[data-pop-open-list]')) {
               sideTab = 'all';
               sideTabPinned = true;
@@ -2031,7 +2220,42 @@
           });
           sideList.addEventListener('input', onFieldChange);
           sideList.addEventListener('change', onFieldChange);
-          dialog.querySelectorAll('.erc-side-tabs button').forEach(btn => {
+
+          // ---- 手动补录表单的事件 ----
+          // 表单值写回 manualForm（而不是只留在 DOM）：refresh() 会重绘侧栏，
+          // 只读 DOM 的话用户敲一半的字会被下一次重绘清空。
+          sideList.addEventListener('input', (e) => {
+            const el = e.target.closest('[data-manual-field]');
+            if (!el || !manualForm) return;
+            manualForm[el.dataset.manualField] = el.value;
+            if (el.dataset.manualField === 'amount') {
+              el.style.borderColor = '';
+              el.style.background = '';
+            }
+          });
+          sideList.addEventListener('keydown', (e) => {
+            if (e.key !== 'Enter') return;
+            if (!e.target.closest('.erc-manual-form')) return;
+            e.preventDefault();
+            addManualReceipt();
+          });
+          sideList.addEventListener('click', (e) => {
+            if (e.target.closest('[data-manual-add]')) { addManualReceipt(); return; }
+            if (e.target.closest('[data-manual-cancel]')) { manualForm = null; renderSide(); return; }
+            const del = e.target.closest('[data-manual-del]');
+            if (del) {
+              const idx = parseInt(del.dataset.manualDel, 10);
+              if (!isNaN(idx) && draft[idx] && draft[idx].__manual) {
+                // 彻底删掉这条手动记录（不是「移出」），下次生成也不会再出现
+                draft.splice(idx, 1);
+                closePopover();
+                refresh();
+              }
+            }
+          });
+          const manualNewBtn = $('erc_manual_new');
+          if (manualNewBtn) manualNewBtn.addEventListener('click', () => openManualForm(null));
+          dialog.querySelectorAll('.erc-side-tabs button[data-tab]').forEach(btn => {
             btn.addEventListener('click', () => { sideTab = btn.dataset.tab; sideTabPinned = true; renderSide(); });
           });
           dialog.querySelectorAll('.erc-view-switch button').forEach(btn => {
@@ -2105,6 +2329,56 @@
         document.body.removeChild(a);
         setTimeout(() => URL.revokeObjectURL(url), 5000);
       }
+
+      // 直接打印当前已生成的报销单 PDF：走隐藏 iframe，避免用户滚回页面顶部点「打印」。
+      // 注意不能复用顶部按钮的逻辑——那边的全局 click 拦截会把 blob 换成合并发票那份。
+      function printPdfBlob(pdfBlob) {
+        const blob = pdfBlob instanceof Blob ? pdfBlob : null;
+        if (!blob) return false;
+
+        const url = URL.createObjectURL(blob);
+        const frameId = '__er_print_frame';
+        const old = document.getElementById(frameId);
+        if (old) old.remove();
+
+        const frame = document.createElement('iframe');
+        frame.id = frameId;
+        frame.style.cssText = 'position:fixed;right:0;bottom:0;width:0;height:0;border:none;opacity:0;pointer-events:none;';
+        // 只触发一次打印：PDF 查看器内部还可能再触发一次 load。
+        let fired = false;
+        frame.addEventListener('load', () => {
+          if (fired) return;
+          fired = true;
+          // 等 PDF 查看器渲染完再调 print，否则弹出来是空白页。
+          setTimeout(() => {
+            try {
+              frame.contentWindow.focus();
+              frame.contentWindow.print();
+            } catch (e) {
+              console.warn('⚠️ iframe 打印失败，回退到新窗口打开', e);
+              try { window.open(url, '_blank'); } catch (e2) {}
+            }
+          }, 400);
+        });
+        document.body.appendChild(frame);
+        // #toolbar=0 让查看器别顶一条工具栏，打印区域更干净
+        frame.src = url + '#toolbar=0&navpanes=0&statusbar=0&zoom=page-width';
+
+        // 打印对话框可能开很久，blob URL 留足时间再回收
+        setTimeout(() => {
+          try { frame.remove(); } catch (e) {}
+          URL.revokeObjectURL(url);
+        }, 10 * 60 * 1000);
+        return true;
+      }
+      window.printPdfBlob = printPdfBlob;
+
+      function printExpenseReport() {
+        if (window.__currentExpenseReportBlob) return printPdfBlob(window.__currentExpenseReportBlob);
+        showSuccessNotification('⚠️ 还没生成报销单，先点「生成报销单」');
+        return false;
+      }
+      window.printExpenseReport = printExpenseReport;
 
       async function getInvoicePdfFiles() {
         const pdfFiles = [];
@@ -2577,7 +2851,7 @@
           <div data-slot="card-header" style="padding:0;margin-bottom:12px;">
             <div data-slot="card-title" style="font-weight:700;font-size:1rem;">📋 生成报销单</div>
             <p style="font-size:12px;color:#6b7280;margin-top:5px;line-height:1.5;">
-              点一次「生成报销单」即可：先弹出确认窗口，左侧实时预览、右侧核对票据，超范围票据须重选归行日期。生成完成后「下载」按钮变为可用。
+              点一次「生成报销单」即可：先弹出确认窗口，左侧实时预览、右侧核对票据，超范围票据须重选归行日期。生成完成后「打印」「下载」按钮变为可用，无需返回页面顶部。
             </p>
           </div>
           <div class="er-trip-config" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:8px;margin-bottom:12px;padding:10px 12px;background:#fafbff;border:1px solid #e8ecf7;border-radius:8px;">
@@ -2607,28 +2881,37 @@
               日期留空时按票据日期自动推断；行程单只用于核对日期与金额，不重复计入报销金额。
             </div>
           </div>
-          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:stretch;">
+          <div style="display:flex;flex-direction:column;gap:8px;">
             <button class="er-btn-gen" title="生成前会先弹出确认窗口，确认后才产出 PDF" style="
-              flex:1;min-width:150px;padding:11px 16px;
+              width:100%;padding:11px 16px;
               background:#4338ca;color:#fff;border:none;border-radius:8px;
               font-size:14px;font-weight:600;cursor:pointer;
               box-shadow:0 6px 16px rgba(67,56,202,0.22);
               transition:background 0.2s,box-shadow 0.2s,transform 0.2s;">
               📋 生成报销单
             </button>
-            <button class="er-btn-dl" disabled title="生成报销单后可下载" style="
-              padding:11px 16px;background:white;color:#4338ca;
-              border:1px solid #c7cbe8;border-radius:8px;font-size:14px;font-weight:600;
-              cursor:not-allowed;opacity:0.5;
-              transition:background 0.2s,border-color 0.2s,opacity 0.2s;">
-              ⬇️ 下载
-            </button>
-            <button class="er-btn-del" title="删除已生成的报销单" style="
-              padding:11px 14px;background:white;color:#ef4444;
-              border:1px solid #fca5a5;border-radius:8px;font-size:14px;
-              cursor:pointer;transition:background 0.2s;">
-              🗑️
-            </button>
+            <div style="display:flex;gap:8px;align-items:stretch;">
+              <button class="er-btn-print" data-er-print="1" disabled title="生成报销单后可打印" style="
+                flex:1;min-width:0;padding:10px 12px;background:white;color:#4338ca;
+                border:1px solid #c7cbe8;border-radius:8px;font-size:14px;font-weight:600;
+                cursor:not-allowed;opacity:0.5;
+                transition:background 0.2s,border-color 0.2s,opacity 0.2s;">
+                🖨️ 打印
+              </button>
+              <button class="er-btn-dl" disabled title="生成报销单后可下载" style="
+                flex:1;min-width:0;padding:10px 12px;background:white;color:#4338ca;
+                border:1px solid #c7cbe8;border-radius:8px;font-size:14px;font-weight:600;
+                cursor:not-allowed;opacity:0.5;
+                transition:background 0.2s,border-color 0.2s,opacity 0.2s;">
+                ⬇️ 下载
+              </button>
+              <button class="er-btn-del" title="删除已生成的报销单" style="
+                flex:none;padding:10px 14px;background:white;color:#ef4444;
+                border:1px solid #fca5a5;border-radius:8px;font-size:14px;
+                cursor:pointer;transition:background 0.2s;">
+                🗑️
+              </button>
+            </div>
           </div>
         `;
 
@@ -2670,16 +2953,23 @@
         });
 
         const genBtn = card.querySelector('.er-btn-gen');
+        const printBtn = card.querySelector('.er-btn-print');
         const dlBtn  = card.querySelector('.er-btn-dl');
         const delBtn = card.querySelector('.er-btn-del');
 
-        // 下载按钮只下载「已生成」的那份 PDF，不再重新生成一遍
+        // 下载 / 打印按钮只针对「已生成」的那份 PDF，不重新生成一遍
         const syncDownloadBtn = () => {
           const has = !!window.__currentExpenseReportBlob;
           dlBtn.disabled = !has;
           dlBtn.style.opacity = has ? '1' : '0.5';
           dlBtn.style.cursor = has ? 'pointer' : 'not-allowed';
           dlBtn.title = has ? '下载已生成的报销单 PDF' : '生成报销单后可下载';
+          if (printBtn) {
+            printBtn.disabled = !has;
+            printBtn.style.opacity = has ? '1' : '0.5';
+            printBtn.style.cursor = has ? 'pointer' : 'not-allowed';
+            printBtn.title = has ? '打印已生成的报销单 PDF（不必滚回页面顶部）' : '生成报销单后可打印';
+          }
         };
 
         genBtn.addEventListener('click', async () => {
@@ -2709,6 +2999,15 @@
           downloadPdf(blob, `报销单_${ds}.pdf`);
         });
 
+        if (printBtn) {
+          printBtn.addEventListener('click', () => {
+            if (printBtn.disabled) { syncDownloadBtn(); return; }
+            const ok = window.printExpenseReport ? window.printExpenseReport() : false;
+            if (ok) showSuccessNotification('🖨️ 已调起打印，选择打印机即可');
+            syncDownloadBtn();
+          });
+        }
+
         delBtn.addEventListener('click', async () => {
           if (window.deleteExpenseReport) await window.deleteExpenseReport();
           syncDownloadBtn();
@@ -2727,6 +3026,10 @@
         };
         dlBtn.onmouseenter = () => { if (!dlBtn.disabled) dlBtn.style.background = '#f5f6fb'; };
         dlBtn.onmouseleave = () => { dlBtn.style.background = 'white'; };
+        if (printBtn) {
+          printBtn.onmouseenter = () => { if (!printBtn.disabled) printBtn.style.background = '#f5f6fb'; };
+          printBtn.onmouseleave = () => { printBtn.style.background = 'white'; };
+        }
         delBtn.onmouseenter = () => delBtn.style.background = '#fef2f2';
         delBtn.onmouseleave = () => delBtn.style.background = 'white';
 

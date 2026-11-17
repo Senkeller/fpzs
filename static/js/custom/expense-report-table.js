@@ -213,6 +213,47 @@
     return kinds;
   }
 
+  /*
+   * 手动补录：有实体票、没上传文件时的手动兜底。
+   * 只认「金额 + 费用列 + 归行日期」，其余（识别、配组、金额仲裁）一律跳过：
+   *   · amountSource = 'manual' —— 人填的数，不该再被标「金额待核」
+   *   · __reportDate 直接给定 —— 表格按「人工确认日期」归行，不会被行程单带走
+   *   · isManual = true —— 表格配组时把它排除在「可被行程单认领」的池子外，
+   *     否则一张金额恰好等于某行程单的手动票会把真发票挤掉
+   * 金额为负按 0、费用列非法退回「普票费」、日期非法退回 fallbackDay（出差开始日），
+   * 这三点都有 Node 回归，避免 UI 传错值时静默丢钱。
+   */
+  function manualReceipt(fields, fallbackDay) {
+    var f = fields || {};
+    var cents = Math.round((parseFloat(f.amount) || 0) * 100);
+    if (!isFinite(cents) || cents < 0) cents = 0;
+    var cat = SELECTABLE_CATS.indexOf(f.category) !== -1 ? f.category : 'ticket';
+    var day = parseDay(f.date) || parseDay(fallbackDay) || null;
+    var name = String(f.name || '').trim().slice(0, 40) || '纸质发票（手动录入）';
+    var d = day || new Date();
+    return {
+      fileName: '',
+      itemName: name,
+      projectName: name,
+      amount: cents / 100,
+      issueDate: d,
+      date: d,
+      isTrip: false,
+      trip: null,
+      isManual: true,
+      __manual: true,
+      __manualId: String(f.id || ''),
+      docKind: '',
+      dateSource: 'manual',
+      splits: null,
+      // 人填的数就是最终结论：不再问「金额待核」，也不让 React 侧的旧值盖回来
+      amountSource: 'manual',
+      __amountConfirmed: true,
+      __reportCategory: cat,
+      __reportDate: day ? dayKey(day) : ''
+    };
+  }
+
   function pickAmount(cached, reactAmount) {
     var c = cached || {};
     var recognized = typeof c.amount === 'number' && isFinite(c.amount) ? c.amount : 0;
@@ -434,7 +475,9 @@
       if (!(trip.amount > 0)) return;
       var preferTs = (parseDay(trip.date) || { getTime: function () { return 0; } }).getTime();
       var pool = invoices.filter(function (inv) {
-        return !usedInvoice[all.indexOf(inv)] && centsOf(inv) > 0;
+        // 手动补录的票不参与行程单配组：它已经有明确日期，被行程单认领只会把
+        // 用户指定的日期改掉，还会挤掉本该配上的真发票。
+        return !inv.isManual && !usedInvoice[all.indexOf(inv)] && centsOf(inv) > 0;
       }).map(function (inv) {
         var d0 = parseDay(inv.__reportDate) || parseDay(inv.issueDate || inv.date);
         return { idx: all.indexOf(inv), cents: centsOf(inv), ts: d0 ? d0.getTime() : 0 };
@@ -903,6 +946,6 @@
     CAT_STYLE: CAT_STYLE,
     utils: { parseDay: parseDay, dayKey: dayKey, slashDate: slashDate, categorize: categorize, fmt: fmt,
       pickAmount: pickAmount, overrideKey: overrideKey, resolveOverride: resolveOverride,
-      normalizeSplits: normalizeSplits, pendingKinds: pendingKinds }
+      normalizeSplits: normalizeSplits, pendingKinds: pendingKinds, manualReceipt: manualReceipt }
   };
 });

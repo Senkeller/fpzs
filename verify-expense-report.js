@@ -348,6 +348,41 @@ check('行程单不占待处理', pk({ isTrip: true, amount: 100 }, true).length
 check('三类同时成立时按「超范围、金额、拆分」排序',
   pk({ amount: 250, amountSource: 'guess', splits: sp }, true).join(',') === 'out,amount,split');
 
+/* ---------- 2g. 手动补录 ---------- */
+console.log('\n=== B7. 手动补录（实体票不传文件） ===');
+const mr = T.utils.manualReceipt;
+const mInv = mr({ id: 'm1', amount: '88.50', category: 'lodging', date: '2026-06-05', name: '南宁柏曼酒店（纸质）' }, '2026-06-02');
+check('金额字符串也认，按分取整', mInv.amount === 88.5 && Math.round(mInv.amount * 100) === 8850);
+check('费用列原样保留', mInv.__reportCategory === 'lodging');
+check('归行日期就是指定日期，来源标记为 manual',
+  mInv.__reportDate === '2026-06-05' && mInv.dateSource === 'manual');
+check('标记为手动、非行程单', mInv.__manual === true && mInv.isManual === true && mInv.isTrip === false);
+check('金额来源 manual，不会进「金额待核」',
+  mInv.amountSource === 'manual' && T.utils.pendingKinds(mInv, false).length === 0);
+check('说明留空时给默认名', mr({ amount: 1, category: 'taxi', date: '2026-06-03' }).projectName === '纸质发票（手动录入）');
+check('金额非法或负数一律归 0',
+  mr({ amount: -5 }).amount === 0 && mr({ amount: 'abc' }).amount === 0 && mr({}).amount === 0);
+check('费用列非法（如 allowance）退回普票费',
+  mr({ amount: 1, category: 'allowance' }).__reportCategory === 'ticket');
+check('日期非法退回出差开始日（不会落到今天/超范围）',
+  mr({ amount: 1, date: '不是日期' }, '2026-06-02').__reportDate === '2026-06-02');
+
+const mModel = T.buildTripModel([mInv], CFG6);
+check('手动票按指定日期落进指定列',
+  mModel.dayRows.find(r => r.key === '2026-06-05').cells.lodging === 8850);
+check('手动票计入合计（金额 + 补贴）', mModel.grandTotal === 8850 + 450 * 100, String(mModel.grandTotal / 100));
+check('归行依据写「人工确认日期」', (mModel.stats.details[0] || {}).by === '人工确认日期');
+
+// 金额恰好等于某张行程单时，手动票也不该被认领走（否则用户指定的日期会被改）
+const mPair = T.buildTripModel([
+  { fileName: '行程单.pdf', amount: 88.5, isTrip: true,
+    trip: { isTrip: true, primaryDate: '2026-06-03', dates: ['2026-06-03'], amount: 88.5 } },
+  mInv
+], CFG6);
+check('手动票不被行程单认领，日期不被改走',
+  mPair.dayRows.find(r => r.key === '2026-06-05').cells.lodging === 8850 &&
+  mPair.dayRows.find(r => r.key === '2026-06-03').cells.lodging === 0);
+
 /* ---------- 3. HTML 结构 ---------- */
 console.log('\n=== C. 表格 HTML 结构 ===');
 function toChinese(n) {
@@ -545,6 +580,21 @@ check('待处理列表顶部给出分类小结与「改好会自动移出」提�
   mainHtml.includes('erc-pend-strip') && mainHtml.includes('改好会自动移出这里'));
 check('金额待核的票在卡片上有可读标签（不只是金额框里的「!」）',
   mainHtml.includes('erc-pend-amount') && mainHtml.includes('金额待核'));
+check('右侧有「手动补录」入口（实体票没上传时的兜底）',
+  mainHtml.includes('id="erc_manual_new"') && mainHtml.includes('＋ 手动补录'));
+check('补录表单只要金额 + 费用列 + 日期（说明可选）',
+  mainHtml.includes('data-manual-field="amount"') && mainHtml.includes('data-manual-field="cat"') &&
+  mainHtml.includes('data-manual-field="date"') && mainHtml.includes('data-manual-field="name"'));
+check('手动票在卡片上标「手动」且能彻底删除（与「移出」区分）',
+  mainHtml.includes('erc-manual-tag') && mainHtml.includes('data-manual-del'));
+check('手动条目单独存 __manualReceipts，不混进识别缓存与 overrides',
+  mainHtml.includes('window.__manualReceipts') && mainHtml.includes('if (inv && inv.__manual) return;'));
+check('空白格也能直接补录（日期与费用列已带好）',
+  mainHtml.includes('data-manual-here') && mainHtml.includes('补录一张纸质票到这一格'));
+check('手动票的类别下拉没有「自动识别」档（无票面可认）',
+  mainHtml.includes('选择这条手动记录填入的费用列'));
+check('一张票都没上传时，有手动补录也能出单（不被「请先上传发票」挡住）',
+  mainHtml.includes('或点「＋ 手动补录」添加一张纸质票') && mainHtml.includes('if (!loadManualReceipts().length)'));
 check('窄屏可在预览/票据视图间切换',
   mainHtml.includes('data-view="preview"') && mainHtml.includes('data-view="tickets"'));
 check('原尺寸预览仍走无编辑属性的正式 HTML',
