@@ -121,9 +121,13 @@
     return parseFloat(String(tk).replace(/[¥￥,]/g, ''));
   }
   // 明细行分类：只区分「住宿」和「交通」两类，其余一律算未知（未知就不拆票）。
+  // 航空/铁路不参与拆票：它们的费用要进「普票费」，而拆票只往「住宿费 / 车船费-其他」
+  // 两列写数。硬拆的话 机票+酒店 的合并票会把机票钱写进车船费-其他（错列），
+  // 比整笔进住宿费更难发现，所以这里返回未知、直接放弃拆票。
   function classifyItemRow(text) {
     var t = String(text || '');
     if (/住宿|客房|房费|间夜|民宿|旅馆|客栈|代订住宿/.test(t)) return 'lodging';
+    if (/航空运输|民航|机票|铁路|火车票|客票/.test(t)) return '';
     if (/交通运输|旅客运输|客运|通行费|加油|停车费|出租车|网约车/.test(t)) return 'transportOther';
     return '';
   }
@@ -139,8 +143,20 @@
     for (var i = 0; i < tokens.length; i++) {
       var tk = tokens[i];
       if (stopRe.test(tk)) { cur = null; continue; }
-      if (/^[*＊]/.test(tk)) { cur = { name: tk, toks: [] }; rows.push(cur); continue; }
-      if (cur) cur.toks.push(tk);
+      if (/^[*＊]/.test(tk)) {
+        // 项目名会被 pdf.js 拆成多个文本项：携程代订票是「*生产生活服务*经纪代理」+
+        // 「服务*代订住宿费」，有些版式干脆拆成「*」+「住宿服务」+「*住宿费」。
+        // 所以星号标记只在「当前行已经读到金额/税率」时才算新行的开头，否则一律当
+        // 项目名的续接——否则一个项目被劈成两行，金额只认到半截，整张票就不拆了。
+        if (cur && !cur.seenMoney) { cur.name += ' ' + tk; cur.toks.push(tk); continue; }
+        cur = { name: tk, toks: [], seenMoney: false };
+        rows.push(cur);
+        continue;
+      }
+      if (cur) {
+        cur.toks.push(tk);
+        if (isMoneyToken(tk) || /^\d{1,2}(?:\.\d+)?%$/.test(tk)) cur.seenMoney = true;
+      }
     }
     if (rows.length < 2) return null;
 

@@ -253,6 +253,19 @@ check('拆分金额与票面不一致时归一（合计=100）',
   mMixOdd.totals.lodging + mMixOdd.totals.transportOther === 10000,
   String((mMixOdd.totals.lodging + mMixOdd.totals.transportOther) / 100));
 
+// 卡片提示与表格必须用同一套归一口径：否则用户把 250 改成 275 后，
+// 提示还写着「住宿费 200 + 车船 50」，而表里写的是 220/55 —— 提示反成误导。
+const norm275 = T.utils.normalizeSplits(MIXSPLIT, 27500);
+check('归一函数：改金额后按原比例给出两笔（220 / 55）',
+  norm275 && norm275[0].cat === 'lodging' && norm275[0].cents === 22000 &&
+  norm275[1].cat === 'transportOther' && norm275[1].cents === 5500,
+  norm275 ? norm275.map(p => p.cat + ':' + p.cents).join(' ') : 'null');
+check('归一函数：拆到不足一分的那笔剔除，退回单列',
+  T.utils.normalizeSplits(MIXSPLIT, 1) === null,
+  String(T.utils.normalizeSplits(MIXSPLIT, 1)));
+check('归一函数：非数组/单笔输入安全返回 null',
+  T.utils.normalizeSplits(null, 100) === null && T.utils.normalizeSplits([{ kind: 'lodging', amount: 5 }], 500) === null);
+
 /* ---------- 2c. 同额多票：行程单配组不依赖遍历顺序 ---------- */
 console.log('\n=== B3. 同额多票配组确定性 ===');
 const CFG6 = { startDate: '2026-06-02', endDate: '2026-06-10', dailyAllowance: 50 };
@@ -529,6 +542,10 @@ check('拖拽只改归行日、不擅自合并混合票的拆分',
   mainHtml.includes('if (Array.isArray(inv.splits) && inv.splits.length > 1) return;'));
 check('人工修正记录按文件指纹寻址（重传顺序变化不再错位）',
   mainHtml.includes('findFileKeyByName') && mainHtml.includes('resolveOverride'));
+check('混合票卡片提示用归一后的金额（改金额后提示不会与表内数打架）',
+  /normalizeSplits\(inv\.splits/.test(mainHtml));
+check('「填入位置」保留「自动识别」档（混合票的人工指定可撤销、拆分能恢复）',
+  mainHtml.includes('自动识别（') && mainHtml.includes('恢复按票据内容判断'));
 
 // 打包清单：真票诊断页会打印票面关键词与金额，只用于开发，不能随发行版分发
 const buildExeSrc = fs.readFileSync(path.join(__dirname, 'build-exe.js'), 'utf8');

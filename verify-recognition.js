@@ -286,6 +286,29 @@ const SAMPLE = {
     价税合计（小写）¥50.00`, '两段行程.pdf');
   check('两行都是交通 → 不拆票', !twoLegs.splits, twoLegs.splits ? 'splits' : 'null');
 
+  // 项目名被 pdf.js 拆成多个文本项（真票上很常见：携程代订票拆成「*生产生活服务*经纪代理」
+  // + 「服务*代订住宿费」，有的版式干脆拆成「*」+「住宿服务」+「*住宿费」）。
+  // 星号标记只在「本行已读到金额/税率」时才算新行，否则当项目名续接，
+  // 否则一个项目被劈成两行，金额只认到半截，整张混合票就不拆了。
+  const splitName = await recognize(`电子发票 发票号码：26332000001234567899 开票日期：2026年06月11日
+    * *住宿服务 *住宿费 200.00
+    *交通运输服务*客运服务费 50.00
+    价税合计（小写）¥250.00
+    备注：入住2026年06月02日 退房06月03日`, '携程商旅发票2.pdf');
+  const snL = (splitName.splits || []).find(s => s.kind === 'lodging');
+  const snT = (splitName.splits || []).find(s => s.kind === 'transportOther');
+  check('项目名被拆成多个文本项时仍能拆行',
+    !!snL && !!snT && Math.abs(snL.amount - 200) < 0.005 && Math.abs(snT.amount - 50) < 0.005,
+    splitName.splits ? JSON.stringify(splitName.splits) : 'null');
+
+  // 机票与住宿开在同一张票上：机票应进「普票费」，而拆票只会写住宿费/车船费-其他两列。
+  // 硬拆会把机票钱写进车船费-其他（错列且难发现），所以直接放弃拆票。
+  const airMixed = await recognize(`电子发票 发票号码：26332000001234567900 开票日期：2026年06月11日
+    旅客运输服务 *生产生活服务*代订住宿费 600.00 *航空运输服务*机票款 880.00
+    价税合计（小写）¥1480.00`, '机票酒店合并票.pdf');
+  check('机票+住宿同票 → 不拆票（机票进普票费，不能混进车船费-其他）',
+    !airMixed.splits, airMixed.splits ? JSON.stringify(airMixed.splits) : 'null');
+
   // ----------------------------------------------------------------
   // 金额来源 amountSource：决定「金额」这一格到底信谁
   //   票面写了「价税合计（小写）」= 法定总额（total），识别结果可以压过 React 解析器；

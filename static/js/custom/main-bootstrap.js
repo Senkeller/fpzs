@@ -1000,12 +1000,19 @@
 
           function catSelectHTML(inv, i) {
             if (inv.isTrip) return '<span class="erc-muted">仅核对日期/金额</span>';
-            const curCat = api.utils.categorize(inv, cfg);
-            const manualCat = !!inv.__reportCategory;
             const catList = api.SELECTABLE_CATS || ['ticket', 'taxi', 'transportOther', 'lodging', 'refund'];
-            return `<select class="erc-input erc-cat${manualCat ? ' is-manual' : ''}" data-idx="${i}" title="选择该发票填入的费用列">
+            const manualCat = !!inv.__reportCategory;
+            // 自动识别那一档要忽略人工指定再算一次，否则选完就显示成「自动识别（普票费）」
+            // 却仍在用人工值，用户看不出自己到底改没改。
+            const autoCat = api.utils.categorize(Object.assign({}, inv, { __reportCategory: '' }), cfg);
+            const autoLabel = '自动识别（' + esc(api.COL_LABEL[autoCat] || autoCat) + '）';
+            // 「自动识别」这一档必须一直可选项：混合票的人工指定会关掉拆分，
+            // 下拉里没有回头路的话，200 住宿 + 50 交通 就永久并成 250 进一列了。
+            return `<select class="erc-input erc-cat${manualCat ? ' is-manual' : ''}" data-idx="${i}"
+              title="选择该发票填入的费用列；选「自动识别」恢复按票据内容判断">
+              <option value="" ${manualCat ? '' : 'selected'}>${autoLabel}</option>
               ${catList.map(k =>
-                `<option value="${k}" ${curCat === k ? 'selected' : ''}>${esc(api.COL_LABEL[k] || k)}</option>`).join('')}
+                `<option value="${k}" ${manualCat === k ? 'selected' : ''}>${esc(api.COL_LABEL[k] || k)}</option>`).join('')}
             </select>`;
           }
 
@@ -1099,10 +1106,14 @@
               })();
               // 混合票（住宿+交通同一张）：金额会被拆到两列，必须明说，否则用户
               // 只看到「住宿费 ¥250」会以为交通那 50 元写丢了。
+              // 数的口径必须和表格一致：用户改过金额后按原比例归一，提示不能还写着旧的两笔。
               const splitNote = (function () {
-                const sp = inv.splits;
-                if (!Array.isArray(sp) || sp.length < 2 || inv.__reportCategory) return '';
-                const parts = sp.map(s => (s.kind === 'lodging' ? '住宿费 ' : '车船费-其他 ') + yuan(Math.round((parseFloat(s.amount) || 0) * 100)));
+                if (!Array.isArray(inv.splits) || inv.splits.length < 2 || inv.__reportCategory) return '';
+                const norm = api.utils.normalizeSplits
+                  ? api.utils.normalizeSplits(inv.splits, Math.round((parseFloat(inv.amount) || 0) * 100))
+                  : null;
+                if (!norm) return '';
+                const parts = norm.map(pc => (pc.cat === 'lodging' ? '住宿费 ' : '车船费-其他 ') + yuan(pc.cents));
                 return `<div class="erc-inv-foot"><span class="erc-muted" style="color:#7c3aed;">⤺ 混合票已按票面明细拆分：${esc(parts.join(' + '))}</span></div>`;
               })();
               return `<div class="erc-inv-row${isBad ? ' is-bad' : ''}" data-idx="${i}" data-inv-card="${g.key}">

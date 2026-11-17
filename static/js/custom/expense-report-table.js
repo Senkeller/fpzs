@@ -234,6 +234,33 @@
     return found;
   }
 
+  // 混合票的每一笔金额归一：比例沿用票面，总额恒等于当前票面金额（用户可能改过），
+  // 尾差补给最大的一笔。归一后不足一分的那笔剔除。
+  // 确认弹窗的「已按票面明细拆分：…」提示也用它，保证提示里的数与表里写的一致。
+  function normalizeSplits(rawSplits, totalCents) {
+    if (!Array.isArray(rawSplits) || rawSplits.length < 2) return null;
+    var cents = Math.max(0, Math.round(totalCents || 0));
+    var raw = [];
+    rawSplits.forEach(function (s) {
+      var c = Math.round((parseFloat(s && s.amount) || 0) * 100);
+      if (c > 0) raw.push({ cat: s.kind === 'lodging' ? 'lodging' : 'transportOther', cents: c });
+    });
+    if (raw.length < 2) return null;
+    var sum = raw.reduce(function (a, p) { return a + p.cents; }, 0);
+    if (sum !== cents && sum > 0) {
+      raw.forEach(function (p) { p.cents = Math.round(cents * p.cents / sum); });
+      var acc = raw.reduce(function (a, p) { return a + p.cents; }, 0);
+      var diff = cents - acc;
+      if (diff !== 0) {
+        var big = raw.slice().sort(function (a, b) { return b.cents - a.cents; })[0];
+        big.cents += diff;
+      }
+    }
+    // 归一后掉到 0 分的那一笔等于不存在，别让它占一行明细
+    var kept = raw.filter(function (p) { return p.cents > 0; });
+    return kept.length > 1 ? kept : null;
+  }
+
   function buildTripModel(invoiceData, cfgInput) {
     var cfg = mergeConfig(cfgInput);
     var all = (invoiceData || []).filter(Boolean);
@@ -329,32 +356,15 @@
     function centsOf(inv) { return Math.max(0, Math.round((parseFloat(inv && inv.amount) || 0) * 100)); }
 
     // 一张票可能拆成多笔（混合票：住宿 + 交通开在同一张发票上）。
-    // 普通票只有一笔，金额 = 票面额；拆出的每一笔写入不同费用列，
-    // 合计恒等于票面金额（用户改过金额时按原比例归一，尾差补给最大的一笔）。
+    // 普通票只有一笔，金额 = 票面额；拆出的每一笔写入不同费用列，合计恒等于票面金额。
     // 用户在弹窗里手工指定「填入位置」后不再拆分——那是明确的人工结论。
     function piecesOf(inv) {
       var cents = centsOf(inv);
       var manual = inv && inv.__reportCategory;
       if (manual && SELECTABLE_CATS.indexOf(manual) !== -1) return [{ cat: manual, cents: cents }];
-      var sp = inv && inv.splits;
-      if (!Array.isArray(sp) || sp.length < 2) return [{ cat: categorize(inv, cfg), cents: cents }];
-      var raw = [];
-      sp.forEach(function (s) {
-        var c = Math.round((parseFloat(s.amount) || 0) * 100);
-        if (c > 0) raw.push({ cat: s.kind === 'lodging' ? 'lodging' : 'transportOther', cents: c });
-      });
-      if (raw.length < 2) return [{ cat: categorize(inv, cfg), cents: cents }];
-      var sum = raw.reduce(function (a, p) { return a + p.cents; }, 0);
-      if (sum !== cents && sum > 0) {
-        raw.forEach(function (p) { p.cents = Math.round(cents * p.cents / sum); });
-        var acc = raw.reduce(function (a, p) { return a + p.cents; }, 0);
-        var diff = cents - acc;
-        if (diff !== 0) {
-          var big = raw.slice().sort(function (a, b) { return b.cents - a.cents; })[0];
-          big.cents += diff;
-        }
-      }
-      return raw;
+      var sp = normalizeSplits(inv && inv.splits, cents);
+      if (!sp) return [{ cat: categorize(inv, cfg), cents: cents }];
+      return sp;
     }
 
     // 在候选发票里找金额之和【严格等于】target 的组合（单位：分，无容差）。
@@ -875,6 +885,7 @@
     generateExpenseReportHTML: generateExpenseReportHTML,
     CAT_STYLE: CAT_STYLE,
     utils: { parseDay: parseDay, dayKey: dayKey, slashDate: slashDate, categorize: categorize, fmt: fmt,
-      pickAmount: pickAmount, overrideKey: overrideKey, resolveOverride: resolveOverride }
+      pickAmount: pickAmount, overrideKey: overrideKey, resolveOverride: resolveOverride,
+      normalizeSplits: normalizeSplits }
   };
 });
