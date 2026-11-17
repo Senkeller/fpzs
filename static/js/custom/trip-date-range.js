@@ -312,7 +312,10 @@
       } else {
         start = k;
         if (end && end < start) end = '';
-        picking = end ? 'start' : 'end';
+        // 选完开始日必须进入「等待结束日」状态。原来写的是 picking = end ? 'start' : 'end'，
+        // 于是只要结束日已经有值，picking 就永远停在 'start'：用户每点一天只是平移开始日，
+        // 结束日怎么点都不会变（想改区间只能先点一个晚于结束日的日期把结束日清空，再回头点）。
+        picking = 'end';
       }
       hover = '';
       gotoMonth(k);

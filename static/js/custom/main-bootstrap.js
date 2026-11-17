@@ -1171,7 +1171,11 @@
           }
 
           const overlay = document.createElement('div');
-          overlay.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,0.55);z-index:100000;display:flex;align-items:center;justify-content:center;padding:16px;';
+          // pointer-events:auto 不能省。app 用 Radix 弹窗时会锁 body 的 pointer-events
+          // （body{pointer-events:none} + 弹窗自己 auto），我们的浮层挂在 body 下会继承 none，
+          // 结果是弹窗画得好好地、鼠标点「取消/确认生成」却穿透到底下的遮罩上，整层点不动。
+          // 这里显式 auto，把本层及其子树从 body 的锁里摘出来。
+          overlay.style.cssText = 'position:fixed;inset:0;pointer-events:auto;background:rgba(15,23,42,0.55);z-index:100000;display:flex;align-items:center;justify-content:center;padding:16px;';
           overlay.innerHTML = `
             <style>
               .erc-dialog{background:#fff;border-radius:16px;width:min(1440px,96vw);max-height:94vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 24px 70px rgba(15,23,42,.35);font-family:-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;color:#111827;}

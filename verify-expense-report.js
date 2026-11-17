@@ -546,6 +546,14 @@ check('混合票卡片提示用归一后的金额（改金额后提示不会与�
   /normalizeSplits\(inv\.splits/.test(mainHtml));
 check('「填入位置」保留「自动识别」档（混合票的人工指定可撤销、拆分能恢复）',
   mainHtml.includes('自动识别（') && mainHtml.includes('恢复按票据内容判断'));
+// app 用 Radix 弹窗时会把 body 锁成 pointer-events:none，浮层挂在 body 下会继承它，
+// 表现为「弹窗画得好好的，鼠标点哪都没反应」。浮层必须显式声明 auto。
+check('确认弹窗显式 pointer-events:auto（不被 app 的 body 锁带着一起失效）',
+  /overlay\.style\.cssText = '[^']*pointer-events:auto/.test(mainHtml));
+const tripRangeSrc = fs.readFileSync(path.join(__dirname, 'static/js/custom/trip-date-range.js'), 'utf8');
+check('区间控件选完开始日就进入「等待结束日」（否则结束日永远改不了）',
+  /start = k;[\s\S]{0,320}?picking = 'end';/.test(tripRangeSrc) &&
+  !/picking = end \? 'start' : 'end';/.test(tripRangeSrc));
 
 // 打包清单：真票诊断页会打印票面关键词与金额，只用于开发，不能随发行版分发
 const buildExeSrc = fs.readFileSync(path.join(__dirname, 'build-exe.js'), 'utf8');
