@@ -31,6 +31,8 @@ fs.mkdirSync(BUILD, { recursive: true });
 fs.mkdirSync(DIST, { recursive: true });
 
 // ---- 1. 收集需要嵌入的静态资源（不含样例票据、测试脚本、文档、服务端源码） ----
+// 注意：verify-trip-detection.html 是真票调试页（会打印票面关键词与金额），
+// 只在源码模式（npm start）下用，不打进发行版 exe —— 用户双击 exe 不该看到诊断页。
 const TOP = ['main.html', '404.html', 'manifest.json', 'favicon.ico',
   'apple-icon.png', 'icon0.svg', 'icon1.png'];
 const files = TOP.filter(f => fs.existsSync(path.join(ROOT, f)));
