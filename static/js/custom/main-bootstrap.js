@@ -953,8 +953,9 @@
 
       // ------------------------------------------------------------------
       // 生成前强制确认窗口：左侧报销单实时预览，右侧逐张发票完整表格。
-      // 右侧默认「全部票据」表格，每张票的项目名/金额/费用列/归行日期一眼可见；
-      // 「待处理」标签只作超范围票据的快捷筛选。预览与表格双向定位高亮。
+      // 右侧默认落在「待处理」：只列需要人看一眼的票（超范围 / 金额待核 / 混合票拆分），
+      // 一张待处理都没有时自动回「全部票据」，免得开窗正对一张空列表。
+      // 预览与表格双向定位高亮。
       // 点击预览单元格 -> 弹出「这张格子由哪些票据组成」的编辑面板。
       // 返回 Promise<draft[] | false>；false = 用户取消，不生成任何 PDF。
       // totalAmountFromStats 仅保留给调用方传参兼容，合计以表格模型为准。
@@ -973,6 +974,9 @@
           let currentIssues = [];
           let currentAnalysis = null;
           let sideTab = 'all';
+          // 用户手动点过右侧标签后就不再自动切默认视图：他正在看「全部票据」时
+          // 不该因为改了一张票的日期而被弹回「待处理」。
+          let sideTabPinned = false;
           let activeCell = null;
 
           const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({
@@ -1081,11 +1085,17 @@
               const manualMark = inv.__reportCategory
                 ? ' <span style="color:#7c3aed;font-weight:700;" title="已人工指定费用列">✎</span>' : '';
               // 状态行只在需要动作时出现：超范围可一键选日期；已移出给出拖回提示。
+              // 金额存疑的票另挂一枚「金额待核」小签——金额框上的「!」只够提示，
+              // 在「待处理」列表里得让人一眼看出是哪一张、为什么被列进来。
+              const amtPending = inv.amountAlt != null || inv.amountSource === 'guess' || inv.amountSource === 'yen';
+              const pendTag = (!inv.__reportExcluded && amtPending)
+                ? `<span class="erc-pend-tag erc-pend-amount" title="金额是按票面文字推测的，或两个来源对不上；核对票面「价税合计」后可直接改">金额待核</span>`
+                : '';
               const foot = inv.__reportExcluded
                 ? `<div class="erc-inv-foot"><span class="erc-muted" style="color:#64748b;">已移出 · 拖回表格恢复</span></div>`
                 : (isBad
-                  ? `<div class="erc-inv-foot"><select class="erc-input erc-quick" data-idx="${i}" title="放入出差日期"><option value="">⚠ 超范围 · 选择出差日期…</option>${dayOptionsHTML(analysis)}</select></div>`
-                  : '');
+                  ? `<div class="erc-inv-foot"><select class="erc-input erc-quick" data-idx="${i}" title="放入出差日期"><option value="">⚠ 超范围 · 选择出差日期…</option>${dayOptionsHTML(analysis)}</select>${pendTag}</div>`
+                  : (pendTag ? `<div class="erc-inv-foot">${pendTag}</div>` : ''));
               // 金额存疑的两种情形，都用金额框里的「!」提示，鼠标悬停看两个数：
               //   1) 识别结果与 React 解析器对不上（都能读到数时才有此情形）
               //   2) 票面根本没印「价税合计（小写）」，金额是按票面文字推测的
@@ -1192,6 +1202,13 @@
               /* 全局只说一次的话（行程单不计金额），替代原先每张卡重复的括注 */
               .erc-note{margin-top:6px;font-size:10px;line-height:1.5;color:#9ca3af;}
               .erc-side-list{flex:1;min-height:0;overflow:auto;padding:0;}
+              /* 「待处理」顶部小结：几笔、分别是哪种，省得用户在卡片堆里自己找 */
+              .erc-pend-strip{display:flex;align-items:center;gap:6px;flex-wrap:wrap;padding:8px 10px;border-bottom:1px solid #eef0f4;background:#fcfcfd;font-size:11px;color:#4b5563;}
+              .erc-pend-tag{display:inline-flex;align-items:center;gap:4px;padding:1px 7px;border-radius:99px;border:1px solid #e5e7eb;background:#fff;font-weight:600;}
+              .erc-pend-tag b{font-weight:700;}
+              .erc-pend-out{border-color:#fecaca;background:#fef2f2;color:#b91c1c;}
+              .erc-pend-amount{border-color:#fde68a;background:#fffbeb;color:#b45309;}
+              .erc-pend-split{border-color:#ddd6fe;background:#f5f3ff;color:#6d28d9;}
               .erc-card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(248px,1fr));gap:10px;align-content:start;padding:10px;}
               .erc-group-card{border:1px solid #cbd5e1;border-left:4px solid #cbd5e1;border-radius:10px;background:#fff;padding:8px;font-size:12px;transition:box-shadow .12s,transform .12s;box-shadow:0 1px 2px rgba(15,23,42,.05);}
               .erc-group-card:hover{box-shadow:0 4px 14px rgba(15,23,42,.13);transform:translateY(-1px);}
@@ -1367,8 +1384,8 @@
                 <aside class="erc-side">
                   <div class="erc-side-head">
                     <div class="erc-side-tabs">
-                      <button type="button" data-tab="all" class="on">全部票据 <span id="erc_all_count">0</span></button>
-                      <button type="button" data-tab="issues">待处理 <span id="erc_issue_count">0</span></button>
+                      <button type="button" data-tab="issues" class="on">待处理 <span id="erc_issue_count">0</span></button>
+                      <button type="button" data-tab="all">全部票据 <span id="erc_all_count">0</span></button>
                     </div>
                     <div class="erc-legend" id="erc_legend"></div>
                     <div class="erc-note">行程单仅作分组依据，不计入报销金额。</div>
@@ -1476,27 +1493,93 @@
             if (typeof window.__erTripRangeRefresh === 'function') window.__erTripRangeRefresh();
           }
 
+          // ---- 「待处理」口径 ----
+          // 只列真要人看一眼的票，按严重程度排序。三类：
+          //   out    归行日期超出出差范围 —— 不改就不能生成（硬阻塞）
+          //   amount 金额存疑（两个来源对不上 / 票面没印价税合计）—— 错一位直接影响合计
+          //   split  混合票已按票面明细拆到两列 —— 拆得对不对需要过一眼
+          // 已移出表格的票不算待处理：那是用户主动移出的结论，不是待办。
+          const PENDING_KINDS = {
+            out: { level: 3, label: '超范围' },
+            amount: { level: 2, label: '金额待核' },
+            split: { level: 1, label: '拆分待确认' }
+          };
+          const PENDING_ORDER = ['out', 'amount', 'split'];
+
+          function pendingKindsOf(idx, analysis, badSet) {
+            const inv = draft[idx];
+            if (!inv) return [];
+            // 判定规则放在表格模块（utils.pendingKinds），Node 里可直接回归
+            if (api.utils && api.utils.pendingKinds) return api.utils.pendingKinds(inv, badSet.has(idx));
+            if (inv.isTrip || inv.__reportExcluded) return [];
+            const kinds = [];
+            if (badSet.has(idx)) kinds.push('out');
+            if (inv.amountAlt != null || inv.amountSource === 'guess' || inv.amountSource === 'yen') kinds.push('amount');
+            if (Array.isArray(inv.splits) && inv.splits.length > 1 && !inv.__reportCategory) kinds.push('split');
+            return kinds;
+          }
+
+          // 逐票展开成 { index, kinds, level }，按严重程度降序；同级保持原始顺序，避免列表跳动。
+          function pendingSummary(analysis) {
+            const badSet = new Set(((analysis && analysis.issues) || []).map(x => x.index));
+            const items = [];
+            draft.forEach((inv, i) => {
+              const kinds = pendingKindsOf(i, analysis, badSet);
+              if (!kinds.length) return;
+              let level = 0;
+              kinds.forEach(k => { level = Math.max(level, PENDING_KINDS[k].level); });
+              items.push({ index: i, kinds: kinds, level: level });
+            });
+            items.sort((a, b) => b.level - a.level || a.index - b.index);
+            return items;
+          }
+
+          // 顶部小结：告诉用户「一共几笔、分别是哪种」，而不是只丢一堆卡片让他自己找。
+          function pendingStripHTML(summary) {
+            if (!summary.length) return '';
+            const tally = {};
+            summary.forEach(x => x.kinds.forEach(k => { tally[k] = (tally[k] || 0) + 1; }));
+            const tags = PENDING_ORDER.filter(k => tally[k]).map(k => {
+              const m = PENDING_KINDS[k];
+              return `<span class="erc-pend-tag erc-pend-${k}">${m.label} <b>${tally[k]}</b></span>`;
+            }).join('');
+            return `<div class="erc-pend-strip">
+              <span>待处理 <b style="color:#111827;">${summary.length}</b> 张</span>${tags}
+              <span class="erc-muted" style="margin-left:auto;font-weight:400;">改好会自动移出这里</span>
+            </div>`;
+          }
+
           function renderSide() {
+            const summary = pendingSummary(currentAnalysis);
+            const pendingSet = new Set(summary.map(x => x.index));
+            // 默认落在「待处理」；一张待处理都没有时回「全部票据」——空列表没有信息量。
+            // 用户手动切过标签就不再抢他的选择，除非待处理已经清零。
+            if (!summary.length) sideTab = 'all';
+            else if (!sideTabPinned) sideTab = 'issues';
             const allCount = $('erc_all_count');
             if (allCount) allCount.textContent = String(draft.length);
             const countEl = $('erc_issue_count');
-            if (countEl) countEl.textContent = String(currentIssues.length);
+            if (countEl) countEl.textContent = String(summary.length);
             dialog.querySelectorAll('.erc-side-tabs button').forEach(btn => {
               btn.classList.toggle('on', btn.dataset.tab === sideTab);
             });
             const badSet = new Set(currentIssues.map(x => x.index));
             const groups = (currentAnalysis.model.groups || []);
             if (sideTab === 'issues') {
-              const badGroups = groups.filter(g =>
-                g.invoiceIndices.some(i => badSet.has(i)) || g.outOfRange);
+              const levelOf = new Map(summary.map(x => [x.index, x.level]));
+              const groupLevel = (g) => g.invoiceIndices.reduce((m, i) => Math.max(m, levelOf.get(i) || 0), 0);
+              // 严重程度高的卡排前面：先解决「不改不能生成」的，再看金额待核。
+              const badGroups = groups
+                .filter(g => g.invoiceIndices.some(i => pendingSet.has(i)))
+                .sort((a, b) => groupLevel(b) - groupLevel(a));
               if (!badGroups.length) {
                 sideList.innerHTML = `<div class="erc-issue" style="border-color:#bbf7d0;background:#f0fdf4;">
                   <div style="font-size:12px;color:#166534;font-weight:700;">没有待处理票据</div>
-                  <div class="erc-muted" style="margin-top:6px;">所有票据日期都在出差范围内。切到「全部票据」可逐张复核。</div>
+                  <div class="erc-muted" style="margin-top:6px;">所有票据日期都在出差范围内、金额无存疑。切到「全部票据」可逐张复核。</div>
                 </div>`;
                 return;
               }
-              sideList.innerHTML = `<div class="erc-card-grid">` +
+              sideList.innerHTML = pendingStripHTML(summary) + `<div class="erc-card-grid">` +
                 badGroups.map(g => groupCardHTML(g, currentAnalysis, badSet)).join('') + `</div>`;
               syncRowHighlight();
               return;
@@ -1643,6 +1726,7 @@
             if (!currentIssues.length) return;
             const issue = currentIssues[0];
             sideTab = 'issues';
+            sideTabPinned = true;
             renderSide();
             const card = sideList.querySelector('.erc-inv-row[data-idx="' + issue.index + '"]');
             if (card) card.scrollIntoView({ block: 'center' });
@@ -1666,8 +1750,10 @@
             fitPreview();
             if (!(options && options.skipSide)) renderSide();
             else {
+              // 输入过程中不重绘侧栏（避免抢焦点），但「待处理」的笔数要跟着走：
+              // 用户在金额框里改一个数，这张票可能立刻就不再是待处理了。
               const countEl = $('erc_issue_count');
-              if (countEl) countEl.textContent = String(currentIssues.length);
+              if (countEl) countEl.textContent = String(pendingSummary(analysis).length);
             }
             if (activeCell) renderPopover();
 
@@ -1685,7 +1771,8 @@
             const invoiceCount = draft.filter(x => !x.isTrip).length;
             const tripCount = draft.length - invoiceCount;
             meta.textContent = `出差人：${cfg.traveler || '未填'} · ${cfg.location || '地点未填'} · ${cfg.reason || '原因未填'} · 补贴 ${cfg.dailyAllowance} 元/天`;
-            stats.textContent = `共 ${draft.length} 项（${invoiceCount} 张发票 / ${tripCount} 张行程单） · 预览合计 ¥${(analysis.model.grandTotal / 100).toFixed(2)} · 待处理 ${currentIssues.length} 笔超范围`;
+            stats.textContent = `共 ${draft.length} 项（${invoiceCount} 张发票 / ${tripCount} 张行程单） · 预览合计 ¥${(analysis.model.grandTotal / 100).toFixed(2)} · 待处理 ${pendingSummary(analysis).length} 笔` +
+              (currentIssues.length ? `（其中超范围 ${currentIssues.length}）` : '');
 
             const blocked = currentIssues.length > 0 && !keep.checked;
             confirmBtn.disabled = blocked;
@@ -1887,6 +1974,7 @@
             dragPayload = null;
             if (ejected) {
               sideTab = 'all';
+              sideTabPinned = true;
               closePopover();
               refresh();
             }
@@ -1932,6 +2020,7 @@
             }
             if (e.target.closest('[data-pop-open-list]')) {
               sideTab = 'all';
+              sideTabPinned = true;
               renderSide();
               const idx = activeCell ? (currentAnalysis.model.rowSources[activeCell.rowKey] || [])[0] : null;
               if (idx) {
@@ -1943,7 +2032,7 @@
           sideList.addEventListener('input', onFieldChange);
           sideList.addEventListener('change', onFieldChange);
           dialog.querySelectorAll('.erc-side-tabs button').forEach(btn => {
-            btn.addEventListener('click', () => { sideTab = btn.dataset.tab; renderSide(); });
+            btn.addEventListener('click', () => { sideTab = btn.dataset.tab; sideTabPinned = true; renderSide(); });
           });
           dialog.querySelectorAll('.erc-view-switch button').forEach(btn => {
             btn.addEventListener('click', () => setViewMode(btn.dataset.view));

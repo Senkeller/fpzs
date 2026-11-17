@@ -331,6 +331,23 @@ const mNeg = T.buildTripModel([
 check('负数金额不会把合计算成负数', mNeg.grandTotal === 25000, String(mNeg.grandTotal / 100));
 check('负数金额不写入费用列', mNeg.totals.lodging === 0, String(mNeg.totals.lodging / 100));
 
+/* ---------- 2f. 「待处理」口径 ---------- */
+console.log('\n=== B6. 待处理 = 超范围 / 金额待核 / 拆分待确认 ===');
+const pk = T.utils.pendingKinds;
+check('正常的票不算待处理', pk({ amount: 100, amountSource: 'total' }, false).length === 0);
+check('超范围算待处理', pk({ amount: 100, amountSource: 'total' }, true).join(',') === 'out');
+check('票面没印价税合计（猜的）算待处理', pk({ amount: 100, amountSource: 'guess' }, false).join(',') === 'amount');
+check('多金额取最大（yen）算待处理', pk({ amount: 100, amountSource: 'yen' }, false).join(',') === 'amount');
+check('两个来源对不上算待处理', pk({ amount: 100, amountAlt: 99, amountSource: 'sole' }, false).join(',') === 'amount');
+check('人工改过金额后不再待处理', pk({ amount: 100, amountSource: 'manual' }, false).length === 0);
+const sp = [{ kind: 'lodging', amount: 200 }, { kind: 'transportOther', amount: 50 }];
+check('混合票拆分待确认', pk({ amount: 250, amountSource: 'total', splits: sp }, false).join(',') === 'split');
+check('人工指定费用列后不再问拆分', pk({ amount: 250, amountSource: 'total', splits: sp, __reportCategory: 'lodging' }, false).length === 0);
+check('已移出的票不占待处理', pk({ amount: 100, amountSource: 'guess', __reportExcluded: true }, true).length === 0);
+check('行程单不占待处理', pk({ isTrip: true, amount: 100 }, true).length === 0);
+check('三类同时成立时按「超范围、金额、拆分」排序',
+  pk({ amount: 250, amountSource: 'guess', splits: sp }, true).join(',') === 'out,amount,split');
+
 /* ---------- 3. HTML 结构 ---------- */
 console.log('\n=== C. 表格 HTML 结构 ===');
 function toChinese(n) {
@@ -518,6 +535,16 @@ check('确认窗口改为「预览即画布」', mainHtml.includes('点击日期
   mainHtml.includes('data-pop-open-list'));
 check('右侧抽屉保留待处理与全部票据两种视图',
   mainHtml.includes('data-tab="issues"') && mainHtml.includes('data-tab="all"'));
+check('右侧默认停在「待处理」，待处理清零后自动回「全部票据」',
+  mainHtml.includes('else if (!sideTabPinned) sideTab = \'issues\'') &&
+  mainHtml.includes('if (!summary.length) sideTab = \'all\''));
+check('用户手动切过标签后不再被自动切走', mainHtml.includes('sideTabPinned = true'));
+check('「待处理」排在「全部票据」前面（默认视图不该是第二个标签）',
+  mainHtml.indexOf('data-tab="issues"') < mainHtml.indexOf('data-tab="all"'));
+check('待处理列表顶部给出分类小结与「改好会自动移出」提示',
+  mainHtml.includes('erc-pend-strip') && mainHtml.includes('改好会自动移出这里'));
+check('金额待核的票在卡片上有可读标签（不只是金额框里的「!」）',
+  mainHtml.includes('erc-pend-amount') && mainHtml.includes('金额待核'));
 check('窄屏可在预览/票据视图间切换',
   mainHtml.includes('data-view="preview"') && mainHtml.includes('data-view="tickets"'));
 check('原尺寸预览仍走无编辑属性的正式 HTML',

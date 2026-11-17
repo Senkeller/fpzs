@@ -196,6 +196,23 @@
     return null;
   }
 
+  /*
+   * 确认弹窗右侧「待处理」的统一口径：只列真要人看一眼的票。
+   *   out    归行日期超出出差范围 —— 不改就不能生成（硬阻塞）
+   *   amount 金额存疑（两源对不上 / 票面没印价税合计，靠推测）—— 错一位直接影响合计
+   *   split  混合票已按票面明细拆到两列 —— 拆得对不对需要过一眼
+   * 已移出表格的票、行程单都不算：前者是用户主动移出的结论，后者不计费。
+   * 放在这里而不是弹窗里，是为了能在 Node 里直接回归这三种判定。
+   */
+  function pendingKinds(inv, isOut) {
+    if (!inv || inv.isTrip || inv.__reportExcluded) return [];
+    var kinds = [];
+    if (isOut) kinds.push('out');
+    if (inv.amountAlt != null || inv.amountSource === 'guess' || inv.amountSource === 'yen') kinds.push('amount');
+    if (Array.isArray(inv.splits) && inv.splits.length > 1 && !inv.__reportCategory) kinds.push('split');
+    return kinds;
+  }
+
   function pickAmount(cached, reactAmount) {
     var c = cached || {};
     var recognized = typeof c.amount === 'number' && isFinite(c.amount) ? c.amount : 0;
@@ -886,6 +903,6 @@
     CAT_STYLE: CAT_STYLE,
     utils: { parseDay: parseDay, dayKey: dayKey, slashDate: slashDate, categorize: categorize, fmt: fmt,
       pickAmount: pickAmount, overrideKey: overrideKey, resolveOverride: resolveOverride,
-      normalizeSplits: normalizeSplits }
+      normalizeSplits: normalizeSplits, pendingKinds: pendingKinds }
   };
 });
