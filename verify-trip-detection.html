@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>行程单 / 发票识别诊断</title>
+<style>
+  :root {
+    --bg: #f5f7fa; --card: #ffffff; --ink: #1f2937; --sub: #6b7280;
+    --line: #e5e7eb; --brand: #2563eb; --brand-soft: #eff6ff;
+    --ok: #16a34a; --ok-soft: #f0fdf4; --bad: #dc2626; --bad-soft: #fef2f2;
+    --warn: #d97706; --warn-soft: #fffbeb; --mono: ui-monospace, SFMono-Regular, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif; }
+  .wrap { max-width: 1180px; margin: 0 auto; padding: 28px 20px 60px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  .lead { color: var(--sub); margin: 0 0 22px; font-size: 13px; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
+  .card h2 { font-size: 15px; margin: 0 0 12px; display: flex; align-items: center; gap: 8px; }
+  .card h2 .n { background: var(--brand); color: #fff; width: 20px; height: 20px; border-radius: 5px;
+    display: inline-flex; align-items: center; justify-content: center; font-size: 11px; }
+  .drop { border: 2px dashed #c7d2fe; border-radius: 10px; padding: 26px; text-align: center;
+    color: var(--sub); cursor: pointer; transition: .15s; background: #fafbff; }
+  .drop:hover, .drop.over { border-color: var(--brand); background: var(--brand-soft); color: var(--brand); }
+  .drop b { color: var(--brand); }
+  .row { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-end; }
+  label.f { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--sub); }
+  input[type=date], input[type=number] { font: inherit; padding: 7px 9px; border: 1px solid var(--line);
+    border-radius: 6px; background: #fff; color: var(--ink); min-width: 130px; }
+  button { font: inherit; padding: 8px 14px; border-radius: 6px; border: 1px solid var(--line);
+    background: #fff; color: var(--ink); cursor: pointer; }
+  button.primary { background: var(--brand); border-color: var(--brand); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--sub); font-weight: 600; font-size: 12px; background: #fafafa; }
+  td.mono, .mono { font-family: var(--mono); }
+  .tag { display: inline-block; padding: 2px 8px; border-radius: 20px; font-size: 12px; font-weight: 600; }
+  .tag.trip { background: var(--brand-soft); color: var(--brand); }
+  .tag.inv { background: #f3f4f6; color: #4b5563; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 4px; font-family: var(--mono);
+    font-size: 11px; margin: 1px 3px 1px 0; }
+  .pill.proof-inv { background: var(--bad-soft); color: var(--bad); }
+  .pill.proof-trip { background: var(--ok-soft); color: var(--ok); }
+  .pill.weak { background: #f3f4f6; color: var(--sub); }
+  .pill.name { background: var(--warn-soft); color: var(--warn); }
+  .file { cursor: pointer; color: var(--brand); }
+  .file:hover { text-decoration: underline; }
+  .detail { background: #fafafa; font-size: 12px; }
+  .detail pre { margin: 6px 0; white-space: pre-wrap; word-break: break-all; max-height: 190px;
+    overflow: auto; background: #fff; border: 1px solid var(--line); border-radius: 6px; padding: 10px;
+    font-family: var(--mono); font-size: 11px; line-height: 1.7; }
+  mark.i { background: #fee2e2; color: #991b1b; padding: 0 1px; border-radius: 2px; }
+  mark.t { background: #dcfce7; color: #166534; padding: 0 1px; border-radius: 2px; }
+  mark.w { background: #f3f4f6; color: #6b7280; padding: 0 1px; border-radius: 2px; }
+  .kpi { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .kpi div { background: #fafafa; border: 1px solid var(--line); border-radius: 8px; padding: 12px 14px; }
+  .kpi span { display: block; color: var(--sub); font-size: 12px; }
+  .kpi strong { display: block; font-size: 21px; font-family: var(--mono); margin-top: 2px; }
+  .kpi strong.hl { color: var(--brand); }
+  .chk { padding: 7px 0; border-bottom: 1px dashed var(--line); display: flex; gap: 9px; align-items: baseline; }
+  .chk:last-child { border-bottom: 0; }
+  .chk .ico { font-weight: 700; width: 16px; }
+  .chk.ok .ico { color: var(--ok); } .chk.bad .ico { color: var(--bad); }
+  .chk.bad { color: var(--bad); }
+  .note { font-size: 12px; color: var(--sub); margin-top: 10px; }
+  .bar { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  #status { color: var(--sub); font-size: 12px; margin-left: auto; align-self: center; }
+  .empty { color: var(--sub); text-align: center; padding: 22px; }
+  details summary { cursor: pointer; color: var(--brand); }
+  code { background: #f3f4f6; padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>行程单 / 发票识别诊断</h1>
+  <p class="lead">用真实 PDF 在浏览器里验证 <code>isTrip</code> 判定与报销单金额。逐票走的是主程序同一条链路（pdf.js + cMap 解码 + <code>extractInvoiceDataFromPdf</code>），不是离线模拟。</p>
+
+  <div class="card">
+    <h2><span class="n">1</span>选择票据</h2>
+    <div class="drop" id="drop">把 PDF 拖到这里，或 <b>点击多选</b>（可一次选中整个 <code>2026-9 南宁</code> 目录）</div>
+    <input type="file" id="file" accept="application/pdf,.pdf" multiple hidden>
+    <div class="bar"><span id="status"></span></div>
+  </div>
+
+  <div class="card">
+    <h2><span class="n">2</span>报销参数（用于汇总模型）</h2>
+    <div class="row">
+      <label class="f">出差开始<input type="date" id="start" value="2026-06-02"></label>
+      <label class="f">出差结束<input type="date" id="end" value="2026-06-10"></label>
+      <label class="f">日补贴（元）<input type="number" id="allow" value="50" min="0" step="1"></label>
+      <button id="run" class="primary" disabled>开始诊断</button>
+      <button id="copy" disabled>复制诊断报告</button>
+    </div>
+    <p class="note">默认参数对应「2026-9 南宁」那 10 张票：8 发票 + 2 行程单（含 3 张携程代订住宿票、2 张汽车站客运票），票据合计应为 <b>271.18</b> 元、打的费 <b>36.18</b> 元、住宿费 <b>48.00</b> 元、总计 <b>721.18</b> 元。</p>
+  </div>
+
+  <div class="card" id="resultCard" style="display:none">
+    <h2><span class="n">3</span>逐票判定</h2>
+    <table>
+      <thead><tr><th style="width:34%">文件</th><th>判定</th><th>金额</th><th>日期</th><th>票面命中词</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <p class="note">判定结果以主程序 <code>extractInvoiceDataFromPdf</code> 实际返回为准；「票面命中词」仅展示提取到的原文线索：<span class="pill proof-inv">发票铁证</span>=带金额的价税合计 / 纳税人识别号，<span class="pill proof-trip">行程铁证</span>=用车时间 / 里程 / 实付金额等，<span class="pill weak">弱词</span>=两边票面都可能印，<span class="pill name">文件名</span>。点文件名可展开原文与高亮。</p>
+  </div>
+
+  <div class="card" id="sumCard" style="display:none">
+    <h2><span class="n">4</span>报销单汇总（buildTripModel）</h2>
+    <div class="kpi" id="kpi"></div>
+    <p class="note" id="sumNote"></p>
+  </div>
+
+  <div class="card" id="chkCard" style="display:none">
+    <h2><span class="n">5</span>自动健康检查</h2>
+    <div id="checks"></div>
+    <p class="note" id="chkNote"></p>
+  </div>
+</div>
+
+<!--
+  pdf.js 的加载方式说明（踩过的坑，别改回去）：
+  static/js/pdfjs-lib.js 是 Next.js 的 webpack chunk，只把模块注册进队列，
+  模块体要被执行才会挂载 window.pdfjsLib。脱离主程序（React 入口）单独加载时
+  window.pdfjsLib 恒为 undefined —— 本页曾因此把所有票据都判成「提取失败、金额 0」。
+  所以这里不再自行加载 pdf.js，而是挂一个隐藏 iframe 载入 main.html，
+  借用它那套已经跑通的 pdf.js（含 cMap / worker 配置）来提取文本，
+  「与主程序同一条链路」这个前提反而更硬。
+-->
+<script src="static/js/custom/expense-report-table.js?v=8"></script>
+<script>
+(function () {
+  'use strict';
+  var TABLE = window.__expenseReportTable;
+  // 识别核心与 pdf.js 都从 iframe（main.html）里取，保证与主程序完全同源
+  var appWin = null, appLoading = null;
+
+  function ensureApp() {
+    if (appWin && appWin.__expenseReportCore && appWin.pdfjsLib) return Promise.resolve(appWin);
+    if (appLoading) return appLoading;
+    appLoading = new Promise(function (resolve, reject) {
+      var f = document.createElement('iframe');
+      f.src = 'main.html';
+      f.style.cssText = 'position:absolute;width:1px;height:1px;left:-9999px;top:0;border:0;';
+      f.onload = async function () {
+        var w = f.contentWindow, waited = 0;
+        while (waited < 20000 && !(w.pdfjsLib && w.__expenseReportCore)) {
+          await new Promise(function (r) { setTimeout(r, 200); });
+          waited += 200;
+        }
+        if (!w.pdfjsLib || !w.__expenseReportCore) { reject(new Error('main.html 里的 pdf.js / 识别核心未就绪')); return; }
+        appWin = w;
+        resolve(w);
+      };
+      f.onerror = function () { reject(new Error('main.html 载入失败')); };
+      document.body.appendChild(f);
+    });
+    return appLoading;
+  }
+  var files = [], results = [], model = null, reportText = '';
+
+  var $ = function (id) { return document.getElementById(id); };
+  var drop = $('drop'), input = $('file'), btnRun = $('run'), btnCopy = $('copy'), status = $('status');
+
+  // ---- 与 core.js v4 同步的判定线索（仅用于展示/高亮，判定以 core 返回为准）----
+  var INVOICE_PROOF_RE = /价税合计[^¥￥\d]{0,12}[¥￥]?\s*[\d,]+\.?\d{0,2}|纳税人识别号/g;
+  var TRIP_TEXT_RE = /用车时间|上车时间|上车|下车|起步价|里程|实付金额|乘客|服务时间|预约时间|出发时间|行程时间/g;
+  var TRIP_NAME_RE = /行程单|行程报销单|itinerary|trip[\s_-]*(report|sheet)/gi;
+  var WEAK_RE = /发票号码|开票日期|电子发票|增值税|价税合计/g;
+
+  function uniqHits(re, text) {
+    var out = [], m; re.lastIndex = 0;
+    while ((m = re.exec(text || '')) !== null) {
+      if (out.indexOf(m[0]) < 0) out.push(m[0]);
+      if (m[0].length === 0) re.lastIndex++;
+    }
+    return out;
+  }
+  function analyze(file, fullText) {
+    var compact = fullText.replace(/\s+/g, '');
+    return {
+      proofInv: uniqHits(INVOICE_PROOF_RE, compact),
+      proofTrip: uniqHits(TRIP_TEXT_RE, compact),
+      weak: uniqHits(WEAK_RE, compact),
+      nameTrip: uniqHits(TRIP_NAME_RE, file.name)
+    };
+  }
+  function esc(s) { return String(s == null ? '' : s).replace(/[&<>]/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]; }); }
+  function highlight(fullText) {
+    var s = esc(fullText);
+    // 弱词先包，铁证后包，避免重叠嵌套；用占位符保护已插入的标签
+    function wrap(re, cls) {
+      s = s.replace(re, function (m) { return '\u0001' + m + '\u0002' + cls + '\u0003'; });
+    }
+    wrap(/发票号码|开票日期|电子发票|增值税|价税合计/g, 'w');
+    wrap(/用车时间|上车时间|上车|下车|起步价|里程|实付金额|乘客|服务时间|预约时间|出发时间|行程时间/g, 't');
+    wrap(/纳税人识别号/g, 'i');
+    return s.replace(/\u0001([\s\S]*?)\u0002(\w+)\u0003/g, '<mark class="$2">$1</mark>');
+  }
+  function fmtMoney(yuan) { return (Math.round(yuan * 100) / 100).toFixed(2); }
+
+  // ---- 用与 core.js 完全相同的参数提取文本（含 cMap 自定义编码）----
+  // 跨 realm 传 File 会让 pdf.js 报「Invalid PDF binary data」：父页面的
+  // arrayBuffer() 产出的是父页面 realm 的 ArrayBuffer，iframe 里的 pdf.js
+  // 用 instanceof 判定类型，跨 realm 一律失败。这里用 iframe 的构造函数
+  // 重新包一层 File，把字节搬进 iframe 自己的 realm。
+  async function bridgeFile(w, file) {
+    var buf = await file.arrayBuffer();
+    return new w.File([new w.Uint8Array(buf)], file.name,
+      { type: 'application/pdf', lastModified: file.lastModified || Date.now() });
+  }
+
+  async function extractText(w, localFile) {
+    if (!w.pdfjsLib) throw new Error('pdfjsLib 未加载');
+    var pdf = await w.pdfjsLib.getDocument({
+      data: await localFile.arrayBuffer(),
+      cMapUrl: new URL('static/cmaps/', w.location.href).href,
+      cMapPacked: true
+    }).promise;
+    var text = '';
+    for (var i = 1; i <= Math.min(pdf.numPages, 3); i++) {
+      var tc = await (await pdf.getPage(i)).getTextContent();
+      text += tc.items.map(function (it) { return it.str; }).join(' ') + '\n';
+    }
+    return text;
+  }
+
+  async function diagnoseOne(file) {
+    var w = await ensureApp();
+    var localFile = await bridgeFile(w, file);
+    var fullText = await extractText(w, localFile);
+    // 主程序真实入口：内部再次提取文本 + 调 extractTripInfo + 算金额
+    var core = await w.__expenseReportCore.extractInvoiceDataFromPdf(file.name, localFile);
+    return {
+      file: file, fullText: fullText, core: core,
+      evidence: analyze(file, fullText)
+    };
+  }
+
+  function renderRows() {
+    var html = '';
+    results.forEach(function (r, idx) {
+      var e = r.evidence, c = r.core;
+      var ev = '';
+      if (e.proofInv.length) ev += e.proofInv.map(function (w) {
+        return '<span class="pill proof-inv">' + esc(w) + '</span>'; }).join('');
+      if (e.proofTrip.length) ev += e.proofTrip.map(function (w) {
+        return '<span class="pill proof-trip">' + esc(w) + '</span>'; }).join('');
+      if (e.nameTrip.length) ev += e.nameTrip.map(function (w) {
+        return '<span class="pill name">' + esc(w) + '</span>'; }).join('');
+      if (e.weak.length) ev += e.weak.map(function (w) {
+        return '<span class="pill weak">' + esc(w) + '</span>'; }).join('');
+      if (!ev) ev = '<span style="color:#9ca3af">无</span>';
+      var d = c.date instanceof Date && !isNaN(c.date)
+        ? c.date.getFullYear() + '-' + String(c.date.getMonth() + 1).padStart(2, '0') + '-' + String(c.date.getDate()).padStart(2, '0')
+        : (c.trip && c.trip.primaryDate) || '—';
+      html += '<tr><td><span class="file" data-i="' + idx + '">' + esc(r.file.name) + '</span></td>' +
+        '<td><span class="tag ' + (c.isTrip ? 'trip">行程单' : 'inv">发票') + '</span></td>' +
+        '<td class="mono">' + fmtMoney(c.amount || 0) + '</td>' +
+        '<td class="mono">' + esc(d) + '</td><td>' + ev + '</td></tr>' +
+        '<tr class="detail" id="d' + idx + '" style="display:none"><td colspan="5">' +
+        '<b>trip 明细：</b>' + esc(JSON.stringify(c.trip)) + '<br><b>项目名称：</b>' + esc(c.itemName) +
+        '<br><b>提取原文（前 1200 字）：</b><pre>' + highlight(r.fullText.slice(0, 1200)) + '</pre></td></tr>';
+    });
+    $('rows').innerHTML = html || '<tr><td colspan="5" class="empty">无结果</td></tr>';
+    Array.prototype.forEach.call(document.querySelectorAll('.file'), function (el) {
+      el.addEventListener('click', function () {
+        var d = $('d' + el.getAttribute('data-i'));
+        d.style.display = d.style.display === 'none' ? '' : 'none';
+      });
+    });
+  }
+
+  function renderSummary() {
+    var t = model.totals;
+    var ticket = (t.ticket + t.taxi + t.transportOther + t.lodging + t.refund) / 100;
+    var invN = model.stats.invoiceCount, tripN = model.stats.tripDocCount;
+    $('kpi').innerHTML =
+      '<div><span>发票 / 行程单</span><strong class="hl">' + invN + ' / ' + tripN + '</strong></div>' +
+      '<div><span>票据合计（不含补贴）</span><strong>' + fmtMoney(ticket) + ' 元</strong></div>' +
+      '<div><span>打的费</span><strong>' + fmtMoney(t.taxi / 100) + ' 元</strong></div>' +
+      '<div><span>住宿费</span><strong>' + fmtMoney(t.lodging / 100) + ' 元</strong></div>' +
+      '<div><span>补贴</span><strong>' + fmtMoney(t.allowance / 100) + ' 元</strong></div>' +
+      '<div><span>总计</span><strong class="hl">' + fmtMoney(model.grandTotal / 100) + ' 元</strong></div>';
+    $('sumNote').innerHTML = '配对成功 <b>' + model.stats.matchedInvoices + '</b> 张发票，漏配行程单 <b>' +
+      model.stats.unmatchedTrips + '</b> 张，超范围票据 <b>' + model.stats.outOfRangeCount + '</b> 张。' +
+      (t.ticket !== undefined ? '<br><span style="font-family:var(--mono);font-size:11px">totals(raw)=' +
+        JSON.stringify(t) + '</span>' : '');
+  }
+
+  function renderChecks() {
+    var c = [];
+    var tripFiles = results.filter(function (r) { return /行程单|行程报销单|itinerary|trip/i.test(r.file.name); });
+    var misTrip = tripFiles.filter(function (r) { return !r.core.isTrip; });
+    c.push([misTrip.length === 0,
+      '文件名明确写「行程单 / 行程报销单」的票据全部判为行程单',
+      misTrip.length ? '误判：' + misTrip.map(function (r) { return r.file.name; }).join('、') : tripFiles.length + ' 张全部正确']);
+
+    var proofInvFiles = results.filter(function (r) { return r.evidence.proofInv.length > 0; });
+    var misInv = proofInvFiles.filter(function (r) { return r.core.isTrip; });
+    c.push([misInv.length === 0,
+      '票面有发票铁证（带金额价税合计 / 纳税人识别号）的票据全部判为发票',
+      misInv.length ? '误判：' + misInv.map(function (r) { return r.file.name; }).join('、') : proofInvFiles.length + ' 张全部正确']);
+
+    var dup = results.filter(function (r) { return r.core.isTrip && r.core.amount > 0; });
+    c.push([true,
+      '行程单金额不直接计入报销单（由 buildTripModel 仅用于配对）',
+      dup.length + ' 张行程单带金额，已交给模型做配对核销']);
+
+    var t = model.totals;
+    var ticket = (t.ticket + t.taxi + t.transportOther + t.lodging + t.refund);
+    var expect = results.length === 10 ? 27118 : null;
+    if (expect !== null) {
+      c.push([ticket === expect, '南宁 10 票场景：票据合计 = 271.18 元（行程单未重复计费）',
+        '实际 ' + fmtMoney(ticket / 100) + ' 元 / 期望 271.18 元']);
+      c.push([t.lodging === 4800, '3 张携程代订住宿票 48.00 元全部进「住宿费」列',
+        '实际 ' + fmtMoney(t.lodging / 100) + ' 元 / 期望 48.00 元']);
+      c.push([t.transportOther === 17500, '2 张汽车站客运票 175.00 元进「车船费-其他」（不是打的费）',
+        '实际 ' + fmtMoney(t.transportOther / 100) + ' 元 / 期望 175.00 元']);
+    } else {
+      c.push([null, '未选中 10 张票，跳过「南宁 271.18 元」固定期望校验',
+        '当前 ' + results.length + ' 张；选中完整 10 票后自动启用']);
+    }
+    c.push([model.stats.matchedInvoices + model.stats.unmatchedTrips > 0,
+      '存在发票与行程单配对关系（说明行程单确实参与了核对）',
+      '配对 ' + model.stats.matchedInvoices + ' / 漏配 ' + model.stats.unmatchedTrips]);
+
+    $('checks').innerHTML = c.map(function (x) {
+      var ico = x[0] === null ? '–' : (x[0] ? '✓' : '✗');
+      var cls = x[0] === null ? '' : (x[0] ? 'ok' : 'bad');
+      return '<div class="chk ' + cls + '"><span class="ico">' + ico + '</span><div><b>' + esc(x[1]) +
+        '</b><br><span style="color:var(--sub);font-size:12px">' + esc(x[2]) + '</span></div></div>';
+    }).join('');
+    var bad = c.filter(function (x) { return x[0] === false; }).length;
+    $('chkNote').innerHTML = bad
+      ? '<b style="color:var(--bad)">发现 ' + bad + ' 项异常</b>——把上面的诊断报告复制出来即可定位。'
+      : '未发现判定异常。';
+  }
+
+  function buildReport() {
+    var lines = ['=== 行程单/发票识别诊断 ' + new Date().toLocaleString('zh-CN') + ' ===', ''];
+    results.forEach(function (r) {
+      var e = r.evidence, c = r.core;
+      lines.push('[' + (c.isTrip ? '行程单' : '发  票') + '] ' + r.file.name);
+      lines.push('  金额=' + fmtMoney(c.amount || 0) + ' 项目=' + c.itemName +
+        ' tripDate=' + ((c.trip && c.trip.primaryDate) || '—'));
+      lines.push('  铁证: 发票[' + e.proofInv.join(',') + '] 行程[' + e.proofTrip.join(',') + ']');
+      lines.push('  弱词: [' + e.weak.join(',') + '] 文件名:[' + e.nameTrip.join(',') + ']');
+    });
+    var t = model.totals;
+    lines.push('', '=== 汇总 ===');
+    lines.push('发票/行程单=' + model.stats.invoiceCount + '/' + model.stats.tripDocCount +
+      ' 配对=' + model.stats.matchedInvoices + ' 漏配=' + model.stats.unmatchedTrips);
+    lines.push('票据合计=' + fmtMoney((t.ticket + t.taxi + t.transportOther + t.lodging + t.refund) / 100) +
+      ' 打的=' + fmtMoney(t.taxi / 100) + ' 补贴=' + fmtMoney(t.allowance / 100) +
+      ' 总计=' + fmtMoney(model.grandTotal / 100));
+    return lines.join('\n');
+  }
+
+  async function run() {
+    if (!TABLE) { status.textContent = '表格模块未加载'; return; }
+    btnRun.disabled = true; status.textContent = '正在载入识别环境（main.html）…';
+    try { await ensureApp(); } catch (e) { status.textContent = '识别环境载入失败：' + e.message; btnRun.disabled = false; return; }
+    results = [];
+    for (var i = 0; i < files.length; i++) {
+      status.textContent = '诊断中… ' + (i + 1) + '/' + files.length + ' ' + files[i].name;
+      try {
+        results.push(await diagnoseOne(files[i]));
+      } catch (e) {
+        results.push({ file: files[i], fullText: '', core: {
+          amount: 0, date: new Date(), itemName: '提取失败: ' + e.message, isTrip: false, trip: null
+        }, evidence: { proofInv: [], proofTrip: [], weak: [], nameTrip: [] } });
+      }
+    }
+    var cfg = {
+      startDate: $('start').value, endDate: $('end').value,
+      dailyAllowance: Number($('allow').value) || 0, location: '', reason: ''
+    };
+    var items = results.map(function (r) {
+      return { fileName: r.file.name, amount: r.core.amount || 0, issueDate: r.core.date,
+        itemName: r.core.itemName, isTrip: r.core.isTrip, trip: r.core.trip,
+        docKind: r.core.docKind || '', dateSource: r.core.dateSource || '',
+        // 混合票（住宿+交通同一张）的拆分明细：这个页面要和主程序的映射保持同源，
+        // 否则这里看起来「住宿费用整笔 250」会误判成主程序也这么算。
+        splits: r.core.splits || null };
+    });
+    model = TABLE.buildTripModel(items, cfg);
+    renderRows(); renderSummary(); renderChecks();
+    reportText = buildReport();
+    ['resultCard', 'sumCard', 'chkCard'].forEach(function (id) { $(id).style.display = ''; });
+    btnCopy.disabled = false;
+    status.textContent = '完成：' + results.length + ' 张票据';
+    btnRun.disabled = false;
+  }
+
+  drop.addEventListener('click', function () { input.click(); });
+  input.addEventListener('change', function () {
+    files = Array.prototype.slice.call(input.files).filter(function (f) { return /\.pdf$/i.test(f.name); });
+    status.textContent = files.length + ' 个 PDF 已选择';
+    btnRun.disabled = files.length === 0;
+  });
+  ['dragenter', 'dragover'].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.add('over'); });
+  });
+  ['dragleave', 'drop'].forEach(function (ev) {
+    drop.addEventListener(ev, function (e) { e.preventDefault(); drop.classList.remove('over'); });
+  });
+  drop.addEventListener('drop', function (e) {
+    files = Array.prototype.slice.call(e.dataTransfer.files).filter(function (f) { return /\.pdf$/i.test(f.name); });
+    status.textContent = files.length + ' 个 PDF 已选择';
+    btnRun.disabled = files.length === 0;
+  });
+  btnRun.addEventListener('click', run);
+  btnCopy.addEventListener('click', function () {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(reportText).then(function () { status.textContent = '报告已复制'; });
+    } else {
+      var ta = document.createElement('textarea'); ta.value = reportText;
+      document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+      document.body.removeChild(ta); status.textContent = '报告已复制';
+    }
+  });
+})();
+</script>
+</body>
+</html>

@@ -7,7 +7,7 @@
     "start": "node portable-server.js",
     "start:dev": "node server.js",
     "build:exe": "node build-exe.js",
-    "test": "node verify-trip-crop.js && node verify-expense-report.js && node verify-real-nanning.js && node verify-pdf-assets.js"
+    "test": "node verify-trip-crop.js && node verify-expense-report.js && node verify-recognition.js && node verify-real-nanning.js && node verify-pdf-assets.js"
   },
   "engines": {
     "node": ">=20"

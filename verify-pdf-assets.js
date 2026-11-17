@@ -2,7 +2,7 @@
 /*
  * 真实票据 PDF「文件结构」校验（零依赖，仅用 Node 内置模块）
  * ------------------------------------------------------------------
- * 背景：verify-real-nanning.js 里的 7 份票据识别结果是固化常量，脚本本身
+ * 背景：verify-real-nanning.js 里的 10 份票据识别结果是固化常量，脚本本身
  *       不解析 PDF。本脚本补上「磁盘上的 PDF 到底是什么样」这一层，用来
  *       验证 trip-crop.js 的裁剪前提（A4 竖版、含文本层、MediaBox 尺寸）。
  *
@@ -132,8 +132,8 @@ const a4Trips = trips.filter(r => r.isA4);
 const nonA4Invoices = invoices.filter(r => !r.isA4);
 
 console.log('\n=== 汇总断言 ===');
-check('共 7 份真实票据', rows.length === 7, '实际 ' + rows.length + ' 份');
-check('识别为 3 份行程单 + 4 张发票', trips.length === 3 && invoices.length === 4,
+check('共 10 份真实票据', rows.length === 10, '实际 ' + rows.length + ' 份');
+check('识别为 2 份行程单 + 8 张发票', trips.length === 2 && invoices.length === 8,
   trips.length + ' / ' + invoices.length);
 check('行程单均为 A4 竖版（裁剪模块生效前提）', a4Trips.length === trips.length,
   a4Trips.length + '/' + trips.length);

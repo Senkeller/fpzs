@@ -38,6 +38,40 @@ const invText = '电子发票（普通发票） 开票日期：2026年11月2日 
 const iInfo = tripInfo(invText, invText.replace(/\s+/g, ''), '滴滴电子发票.pdf');
 check('发票不会被误判为行程单', iInfo.isTrip === false);
 
+// 回归：行程单上常印「发票号码 / 开票日期 / 电子发票」用于关联发票，
+// 旧逻辑用这些词一票否决 isTrip，导致行程单被当成发票与其对应发票重复计费。
+const tripWithInvoiceWords = tripText + ' 关联发票号码 12345678 开票日期：2026年11月2日 电子发票';
+const tiw = tripInfo(tripWithInvoiceWords, tripWithInvoiceWords.replace(/\s+/g, ''), '滴滴出行行程单.pdf');
+check('行程单含发票号码/开票日期字样仍判为行程单（防重复计费回归）', tiw.isTrip === true);
+
+// 回归：真实票据存在「…行程报销单.pdf」命名，严格文件名正则需覆盖。
+const tripReportText = tripText + ' 发票号码 开票日期';
+const trp = tripInfo(tripReportText, tripReportText.replace(/\s+/g, ''), '第三方网约车服务公司_滴滴出行行程报销单.pdf');
+check('「行程报销单」文件名识别为行程单', trp.isTrip === true);
+
+// 回归：文本无行程特征、仅平台名命中 + 发票专属字段，必须仍判发票（防误伤）。
+const platformInv = '滴滴出行 客运服务费 电子发票 价税合计 ¥15.00 发票号码 87654321';
+const pinv = tripInfo(platformInv, platformInv.replace(/\s+/g, ''), '滴滴出行.pdf');
+check('仅平台名命中的电子发票不算行程单（防误伤）', pinv.isTrip === false);
+
+// 审查回归①（防漏算）：真发票文件名含"行程单"字样（如"行程单对应的发票"），
+// 文本有发票铁证（带金额的价税合计/纳税人识别号）→ 必须判发票，否则金额漏算。
+const invNamedLikeTrip = invText + ' 增值税专用发票';
+const int = tripInfo(invNamedLikeTrip, invNamedLikeTrip.replace(/\s+/g, ''), '滴滴行程单对应的电子发票.pdf');
+check('发票文件名含行程单字样仍判为发票（防漏算回归）', int.isTrip === false);
+
+// 审查回归②（防重复计费）：行程单文本含"增值税/价税合计说明"票面说明字样（无金额），
+// 不构成发票铁证 → 行程特征兜底 → 必须判行程单。
+const tripWithTaxWords = tripText + ' 本行程可开具增值税电子普通发票 价税合计说明';
+const twt = tripInfo(tripWithTaxWords, tripWithTaxWords.replace(/\s+/g, ''), '享道出行.pdf');
+check('行程单文本含增值税/价税合计字样仍判为行程单（防重复计费回归）', twt.isTrip === true);
+
+// 审查回归③（防重复计费）：行程单文件名含"电子发票"票种词（如"电子发票行程单.pdf"）。
+// 票种词不再一票否决，文本有行程明细即判行程单，否则会与其对应发票重复计费。
+const tripNamedWithInvoiceWord = tripText + ' 关联发票号码 12345678';
+const tni = tripInfo(tripNamedWithInvoiceWord, tripNamedWithInvoiceWord.replace(/\s+/g, ''), '高德打车电子发票行程单.pdf');
+check('行程单文件名含电子发票票种词仍判为行程单（防重复计费回归）', tni.isTrip === true);
+
 /* ---------- 1b. 发票统计口径：当前文件 vs 历史缓存 ---------- */
 console.log('\n=== A2. 发票统计卡片口径 ===');
 const selectStats = global.__expenseReportCore.selectInvoiceStatsItems;
@@ -92,6 +126,21 @@ check('按行程单日期 10/20 归入打的费', mB.dayRows.find(r => r.key ===
 check('开票日期超范围但已配对，不算超范围', mB.stats.outOfRangeCount === 0);
 check('合计 = 补贴 250 + 打车 36.8', mB.grandTotal === 28680, String(mB.grandTotal / 100));
 
+// 端到端回归：一张发票 + 它对应的行程单（行程单文本含发票关键词）。
+// 若行程单被误判成发票，打的费会变成 36.80×2。修复后应仍是 36.80。
+const e2eTripRaw = '滴滴出行行程单 用车时间：2026-10-20 里程 12.5 实付金额 ¥36.80 乘客 张先生 ' +
+  '关联发票号码 12345678 开票日期：2026年11月2日 电子发票';
+const e2eTrip = tripInfo(e2eTripRaw, e2eTripRaw.replace(/\s+/g, ''), '滴滴出行电子行程单.pdf');
+const mE2E = T.buildTripModel([
+  { fileName: '滴滴电子发票.pdf', amount: 36.8, issueDate: d(2026, 11, 2), projectName: '客运服务费', isTrip: false },
+  { fileName: '滴滴出行电子行程单.pdf', amount: e2eTrip.amount, issueDate: d(2026, 11, 2),
+    projectName: '出行', isTrip: e2eTrip.isTrip,
+    trip: { isTrip: e2eTrip.isTrip, primaryDate: e2eTrip.primaryDate,
+      dates: e2eTrip.dates, amount: e2eTrip.amount } }
+], CFG);
+check('端到端：含发票字样的行程单不被重复计费', mE2E.totals.taxi === 3680,
+  '打的费=' + (mE2E.totals.taxi / 100) + ' 元，发票数=' + mE2E.stats.invoiceCount);
+
 // 场景 3：没有行程单，开票日期超范围 -> 单列为超范围票据
 const mC = T.buildTripModel([
   { fileName: '酒店发票.pdf', amount: 468, issueDate: d(2026, 11, 1), projectName: '住宿费' }
@@ -101,17 +150,51 @@ check('住宿费归到住宿费列', mC.totals.lodging === 46800);
 check('超范围票据不计补贴', mC.outRow.cells.allowance === 0);
 check('金额仍计入合计', mC.grandTotal === 71800, String(mC.grandTotal / 100));
 
-// 场景 4：一张汇总发票对应多张行程单（金额之和核对）
+// 场景 4（新口径）：一张行程单作容器，金额【严格相等】的一组发票（1~N 张）归到同组。
+// 金额一律取发票、整笔填入；行程单金额只用于分组，不参与计算与填入。
 const mD = T.buildTripModel([
-  { fileName: '网约车汇总发票.pdf', amount: 60, issueDate: d(2026, 11, 3), projectName: '客运服务费' },
-  { fileName: '行程单1.pdf', amount: 20, isTrip: true, trip: { isTrip: true, primaryDate: '2026-10-19', dates: ['2026-10-19'], amount: 20 } },
-  { fileName: '行程单2.pdf', amount: 40, isTrip: true, trip: { isTrip: true, primaryDate: '2026-10-21', dates: ['2026-10-21'], amount: 40 } }
+  { fileName: '行程单.pdf', amount: 60, isTrip: true,
+    trip: { isTrip: true, primaryDate: '2026-10-19', dates: ['2026-10-19'], amount: 60 } },
+  { fileName: '网约车发票1.pdf', amount: 20, issueDate: d(2026, 11, 3), projectName: '客运服务费' },
+  { fileName: '网约车发票2.pdf', amount: 40, issueDate: d(2026, 11, 3), projectName: '客运服务费' }
 ], CFG);
-check('多张行程单合计核对成功', mD.stats.matchedInvoices === 1);
-check('金额按行程单日期分摊 10/19=20、10/21=40',
-  mD.dayRows.find(r => r.key === '2026-10-19').cells.taxi === 2000 &&
-  mD.dayRows.find(r => r.key === '2026-10-21').cells.taxi === 4000);
-check('分摊后无超范围票据', mD.stats.outOfRangeCount === 0);
+check('一张行程单认领两张严格等额发票（发票数=2）', mD.stats.matchedInvoices === 2);
+check('两张发票整笔填入行程单日期 10/19，合计 60',
+  mD.dayRows.find(r => r.key === '2026-10-19').cells.taxi === 6000,
+  String(mD.dayRows.find(r => r.key === '2026-10-19').cells.taxi / 100));
+check('归组后无超范围票据', mD.stats.outOfRangeCount === 0);
+check('卡片以行程单为容器含两张发票、金额取发票之和',
+  (() => {
+    const g = (mD.groups || []).find(x => x.invoiceIndices.length === 2);
+    return !!g && g.tripIndices.length === 1 && g.amountCents === 6000 &&
+      g.trips[0].amountCents === 6000 && g.tripIndices[0] === 0;
+  })(), JSON.stringify((mD.groups || []).map(g => ({ key: g.key, inv: g.invoiceIndices, trips: g.tripIndices, amt: g.amountCents }))));
+check('合计 = 补贴250 + 发票60（行程单60不重复计费）', mD.grandTotal === 31000, String(mD.grandTotal / 100));
+
+// 场景 4b（审查回归①）：金额严格以发票为准。行程单金额识别有 1 分误差时，
+// 旧逻辑会把发票 60 填成 60.01；新逻辑下行程单金额只用于严格分组，
+// 绝不进入格子/合计，合计必须等于发票金额。
+const mD2 = T.buildTripModel([
+  { fileName: '网约车发票.pdf', amount: 60, issueDate: d(2026, 10, 19), projectName: '客运服务费' },
+  { fileName: '行程单1.pdf', amount: 20, isTrip: true, trip: { isTrip: true, primaryDate: '2026-10-19', dates: ['2026-10-19'], amount: 20 } },
+  { fileName: '行程单2.pdf', amount: 40.01, isTrip: true, trip: { isTrip: true, primaryDate: '2026-10-21', dates: ['2026-10-21'], amount: 40.01 } }
+], CFG);
+check('行程单有 1 分误差也不污染合计（严格=发票60+补贴250）', mD2.grandTotal === 31000, String(mD2.grandTotal / 100));
+check('行程单有误差时发票金额仍整笔=60、不拆不放大',
+  mD2.stats.details.filter(x => !x.isTrip).every(x => x.cents === 6000 && x.pieces.length === 1));
+check('严格口径下误差行程单不误认领发票', mD2.stats.matchedInvoices === 0 && mD2.stats.unmatchedTrips === 2);
+
+// 场景 4c（审查回归②）：一张行程单对多张发票时，行程单金额只是分组依据。
+// 故意把行程单金额写错（40），但两张发票 20+40=60 仍应各自整笔填入、合计=60，
+// 证明填入金额与分组用的行程单金额彻底解耦。
+const mD3 = T.buildTripModel([
+  { fileName: '行程单.pdf', amount: 40, isTrip: true,
+    trip: { isTrip: true, primaryDate: '2026-10-20', dates: ['2026-10-20'], amount: 40 } },
+  { fileName: '发票1.pdf', amount: 20, issueDate: d(2026, 10, 20), projectName: '客运服务费' },
+  { fileName: '发票2.pdf', amount: 40, issueDate: d(2026, 10, 20), projectName: '客运服务费' }
+], CFG);
+check('分组用行程单金额=40时只认领等额发票，合计仍=全部发票+补贴',
+  mD3.grandTotal === 31000 && mD3.stats.invoiceCount === 2, String(mD3.grandTotal / 100));
 
 // 场景 5：费用归类
 const mE = T.buildTripModel([
@@ -124,6 +207,116 @@ check('火车票/通行费 -> 普票费', mE.totals.ticket === 13000, String(mE.
 check('退票费 -> 其他(退票费)', mE.totals.refund === 2000);
 check('未识别项目 -> 车船费-其他（不丢钱）', mE.totals.transportOther === 1250);
 check('合计 = 250 + 162.5', mE.grandTotal === 41250, String(mE.grandTotal / 100));
+
+/* ---------- 2b. 混合票（住宿+交通同一张发票）拆行 ---------- */
+console.log('\n=== B2. 混合票按明细行拆到两列 ===');
+const MIXSPLIT = [{ kind: 'lodging', amount: 200 }, { kind: 'transportOther', amount: 50 }];
+const mMix = T.buildTripModel([
+  { fileName: '携程商旅发票.pdf', amount: 250, issueDate: d(2026, 10, 20), projectName: '混合票据',
+    docKind: 'mixed', splits: MIXSPLIT }
+], CFG);
+check('住宿 200 进住宿费列', mMix.totals.lodging === 20000, String(mMix.totals.lodging / 100));
+check('交通 50 进车船费-其他', mMix.totals.transportOther === 5000, String(mMix.totals.transportOther / 100));
+check('拆行合计不变（250）', mMix.totals.lodging + mMix.totals.transportOther === 25000,
+  String((mMix.totals.lodging + mMix.totals.transportOther) / 100));
+check('明细标为 mixed', mMix.stats.details[0].category === 'mixed', mMix.stats.details[0].category);
+check('明细里两笔分摊金额可追溯',
+  mMix.stats.details[0].pieces.length === 2 &&
+  mMix.stats.details[0].pieces.reduce((s, p) => s + p.cents, 0) === 25000);
+check('一张混合票只算一张（count=1）',
+  mMix.dayRows.find(r => r.key === '2026-10-20').cells.count === 1);
+
+// 人工指定费用列 = 明确结论，压过拆行
+const mMixManual = T.buildTripModel([
+  { fileName: '携程商旅发票.pdf', amount: 250, issueDate: d(2026, 10, 20), projectName: '混合票据',
+    docKind: 'mixed', splits: MIXSPLIT, __reportCategory: 'lodging' }
+], CFG);
+check('人工指定「住宿费」后不再拆行', mMixManual.totals.lodging === 25000 &&
+  mMixManual.totals.transportOther === 0,
+  '住宿=' + (mMixManual.totals.lodging / 100) + ' 其他=' + (mMixManual.totals.transportOther / 100));
+
+// 用户改过金额：按原比例归一，合计恒等于改后的金额（不出现少一分/多一分）
+const mMixEdited = T.buildTripModel([
+  { fileName: '携程商旅发票.pdf', amount: 300, issueDate: d(2026, 10, 20), projectName: '混合票据',
+    docKind: 'mixed', splits: MIXSPLIT }
+], CFG);
+check('改金额后按比例重新拆分且合计一分不差',
+  mMixEdited.totals.lodging === 24000 && mMixEdited.totals.transportOther === 6000,
+  '住宿=' + (mMixEdited.totals.lodging / 100) + ' 其他=' + (mMixEdited.totals.transportOther / 100));
+
+// 拆不干净（如 100 一分为三）也要保证尾差落到最大的一笔，合计恒等
+const mMixOdd = T.buildTripModel([
+  { fileName: 'x.pdf', amount: 100, issueDate: d(2026, 10, 20), projectName: '混合票据',
+    docKind: 'mixed', splits: [{ kind: 'lodging', amount: 33.33 }, { kind: 'transportOther', amount: 66.67 }] }
+], CFG);
+check('拆分金额与票面不一致时归一（合计=100）',
+  mMixOdd.totals.lodging + mMixOdd.totals.transportOther === 10000,
+  String((mMixOdd.totals.lodging + mMixOdd.totals.transportOther) / 100));
+
+/* ---------- 2c. 同额多票：行程单配组不依赖遍历顺序 ---------- */
+console.log('\n=== B3. 同额多票配组确定性 ===');
+const CFG6 = { startDate: '2026-06-02', endDate: '2026-06-10', dailyAllowance: 50 };
+const taxiLate = { fileName: 'taxi-A.pdf', amount: 12, issueDate: d(2026, 6, 9), projectName: '客运服务费' };
+const taxiEarly = { fileName: 'taxi-B.pdf', amount: 12, issueDate: d(2026, 6, 3), projectName: '客运服务费' };
+const tripFirst = { fileName: 'trip-1.pdf', amount: 12, isTrip: true,
+  trip: { isTrip: true, primaryDate: '2026-06-02', dates: ['2026-06-02'], amount: 12 } };
+const tripLast = { fileName: 'trip-2.pdf', amount: 12, isTrip: true,
+  trip: { isTrip: true, primaryDate: '2026-06-10', dates: ['2026-06-10'], amount: 12 } };
+function assignMap(model) {
+  const out = {};
+  (model.stats.details || []).forEach(d => { out[d.fileName] = (d.dates || [])[0] || ''; });
+  return out;
+}
+const orderA = T.buildTripModel([taxiLate, taxiEarly, tripFirst, tripLast], CFG6);
+const orderB = T.buildTripModel([tripLast, tripFirst, taxiEarly, taxiLate], CFG6);
+const mapA = assignMap(orderA);
+const mapB = assignMap(orderB);
+check('同额两票：开票早的那张配 6-02 的行程', mapA['taxi-B.pdf'] === '2026-06-02', mapA['taxi-B.pdf']);
+check('同额两票：开票晚的那张配 6-10 的行程', mapA['taxi-A.pdf'] === '2026-06-10', mapA['taxi-A.pdf']);
+check('打乱输入顺序后配组结果完全一致',
+  JSON.stringify(mapA) === JSON.stringify(mapB),
+  JSON.stringify(mapB));
+check('每天各 12 元、两天合计 24 元 + 补贴 450',
+  orderA.dayRows.find(r => r.key === '2026-06-02').cells.taxi === 1200 &&
+  orderA.dayRows.find(r => r.key === '2026-06-10').cells.taxi === 1200 &&
+  orderA.grandTotal === 47400, String(orderA.grandTotal / 100));
+
+/* ---------- 2d. 人工修正记录的寻址：按文件指纹，不按序号 ---------- */
+console.log('\n=== B4. 人工修正不会因重传顺序变化而错位 ===');
+const OV = T.utils.resolveOverride;
+const OK = T.utils.overrideKey;
+const fpA = '发票A.pdf::1000::1700000000000';
+const fxA = '发票A.pdf::1000::1700000000001';
+
+const ov1 = {};
+ov1[OK('发票A.pdf', fpA, 0)] = { reportDate: '2026-10-20', category: 'lodging' };
+check('键用文件指纹，与序号无关', OK('发票A.pdf', fpA, 0) === fpA && OK('发票A.pdf', fpA, 7) === fpA,
+  OK('发票A.pdf', fpA, 7));
+check('重传后序号平移仍命中同一条修正',
+  OV(ov1, '发票A.pdf', fpA, 9) === ov1[fpA]);
+check('文件另存后指纹变了，同名单条仍认（不让重下发票清空人工确认）',
+  OV(ov1, '发票A.pdf', fxA, 0) === ov1[fpA]);
+
+const ov2 = {};
+ov2[fpA] = { reportDate: '2026-10-20' };
+ov2[fxA] = { reportDate: '2026-10-21' };
+check('同名两张票：指纹命中各自的一条', OV(ov2, '发票A.pdf', fxA, 0) === ov2[fxA]);
+check('同名两张票且指纹未知：放弃匹配，绝不张冠李戴',
+  OV(ov2, '发票A.pdf', '发票A.pdf::9999::1', 0) === null);
+check('没有任何修正记录时返回 null', OV({}, '发票A.pdf', fpA, 0) === null);
+check('只有一条兜底键（无指纹）时按文件名认', (function () {
+  const ov3 = {}; ov3[OK('发票C.pdf', '', 2)] = { category: 'ticket' };
+  return OV(ov3, '发票C.pdf', '', 5) === ov3['发票C.pdf::#2'];
+})());
+
+/* ---------- 2e. 负数金额 ---------- */
+console.log('');
+console.log('=== B5. 金额不允许负数 ===');
+const mNeg = T.buildTripModel([
+  { fileName: '负数票.pdf', amount: -100, issueDate: d(2026, 10, 20), projectName: '住宿费' }
+], CFG);
+check('负数金额不会把合计算成负数', mNeg.grandTotal === 25000, String(mNeg.grandTotal / 100));
+check('负数金额不写入费用列', mNeg.totals.lodging === 0, String(mNeg.totals.lodging / 100));
 
 /* ---------- 3. HTML 结构 ---------- */
 console.log('\n=== C. 表格 HTML 结构 ===');
@@ -205,6 +398,61 @@ check('预览 HTML 含超范围提示行（对应确认窗口截图）',
 check('预览为紧凑版式，正式版式仍是 A4 整页',
   !T.generateExpenseReportHTML(outInvoices, null, CFG2, previewHelpers).includes('height:1123px') &&
   T.generateExpenseReportHTML(outInvoices, null, CFG2, { numberToChinese: toChinese }).includes('width:794px;height:1123px'));
+const previewWithMeta = T.generateExpenseReportHTML(outInvoices, null, CFG2, previewHelpers);
+check('预览格带日期/费用列/票据数定位属性',
+  previewWithMeta.includes('data-row-key="2026-10-20"') &&
+  previewWithMeta.includes('data-cat="ticket"') &&
+  previewWithMeta.includes('data-source-count="1"'));
+check('正式 PDF 输出不混入编辑定位属性', !htmlA.includes('data-row-key=') && !htmlA.includes('data-cat='));
+check('模型暴露「单元格 -> 票据」映射',
+  (a1.model.cellSources['2026-10-20|ticket'] || []).some(s => s.index === 2 && s.cents === 10000),
+  JSON.stringify(a1.model.cellSources['2026-10-20|ticket'] || []));
+check('超范围行也暴露票据映射',
+  (a1.model.cellSources['__out__|taxi'] || []).some(s => s.index === 0 && s.cents === 3025));
+
+// 行程卡片配组 + 预览 chip（预览编辑视图，不参与金额口径）
+check('模型派生行程卡片配组：发票带同额行程单',
+  (a1.model.groups || []).some(g => g.key === 'inv-0' && g.invoiceIndices[0] === 0 && g.tripIndices.indexOf(1) !== -1),
+  JSON.stringify((a1.model.groups || []).map(g => ({ key: g.key, trips: g.tripIndices }))));
+check('配组金额取发票、不重复计行程单',
+  (a1.model.groups || []).filter(g => g.key === 'inv-0').every(g => g.amountCents === 3025 && g.trips[0].amountCents === 3025));
+check('无行程单的发票单独成组',
+  (a1.model.groups || []).some(g => g.key === 'inv-2' && g.tripIndices.length === 0 && g.amountCents === 10000));
+check('预览金额格含发票图标 chip',
+  previewWithMeta.includes('class="erc-chip"') && previewWithMeta.includes('data-chip-idx="0"') &&
+  previewWithMeta.includes('🎫'));
+check('正式 PDF 输出不含 chip 与类别样式',
+  !htmlA.includes('erc-chip') && !htmlA.includes('data-chip-idx') && !htmlA.includes('CAT_STYLE'));
+check('预览 chip 可拖拽（draggable）', previewWithMeta.includes('draggable="true"') && previewWithMeta.includes('data-chip-idx="0"'));
+
+// 移出表格：__reportExcluded 的发票不计入格子/合计/问题，但仍保留卡片可拖回
+const excludedData = outInvoices.map(inv => Object.assign({}, inv));
+excludedData[0].__reportExcluded = true; // 30.25 超范围那张移出
+const ax = T.analyzeExpenseReport(excludedData, CFG2);
+check('移出票据不进入问题列表', ax.issues.length === 0, 'issues=' + ax.issues.length);
+check('移出票据不计入合计（原合计 - 该票 30.25 元）',
+  ax.model.grandTotal === a1.model.grandTotal - 3025,
+  `total=${ax.model.grandTotal} before=${a1.model.grandTotal}`);
+check('移出票据不占超范围行', ax.model.outRow === null && ax.model.stats.outOfRangeCount === 0);
+check('移出计数与明细标记', ax.model.stats.excludedCount === 1 &&
+  ax.model.stats.details.some(d => d.index === 0 && d.excluded === true));
+check('移出票据仍保留卡片供拖回',
+  (ax.model.groups || []).some(g => g.key === 'inv-0' && g.excluded === true &&
+    g.invoiceIndices.indexOf(0) !== -1));
+check('移出后预览不再含该票 chip', (() => {
+  const h = T.generateExpenseReportHTML(excludedData, null, CFG2, previewHelpers);
+  return !h.includes('data-chip-idx="0"') && h.includes('data-chip-idx="2"');
+})());
+check('正式 PDF 移出后合计不含该票且不混入 excluded 字段', (() => {
+  const h = T.generateExpenseReportHTML(excludedData, null, CFG2, { numberToChinese: toChinese });
+  return h.includes('width:794px;height:1123px') && !h.includes('__reportExcluded');
+})());
+// 重新拖回（清除 __reportExcluded）后完全恢复
+const restored = excludedData.map(inv => Object.assign({}, inv));
+delete restored[0].__reportExcluded;
+const ar = T.analyzeExpenseReport(restored, CFG2);
+check('移出后再拖回，金额与问题全部恢复',
+  ar.model.grandTotal === a1.model.grandTotal && ar.issues.length === a1.issues.length);
 
 // 用户在确认窗口把归行日期改到出差范围内
 const fixed = outInvoices.map(inv => Object.assign({}, inv));
@@ -253,6 +501,14 @@ check('两条入口统一走同一个确认窗口',
 check('生成前强制调用确认窗口', /const confirmedData = await showExpenseReportConfirmDialog/.test(mainHtml));
 check('未修正超范围时确认按钮被禁用', mainHtml.includes('confirmBtn.disabled = blocked'));
 check('确认窗口含实时预览与问题定位', mainHtml.includes('{ preview: true }') && mainHtml.includes('定位第 1 笔'));
+check('确认窗口改为「预览即画布」', mainHtml.includes('点击日期行或金额格直接修改对应票据') &&
+  mainHtml.includes('data-pop-open-list'));
+check('右侧抽屉保留待处理与全部票据两种视图',
+  mainHtml.includes('data-tab="issues"') && mainHtml.includes('data-tab="all"'));
+check('窄屏可在预览/票据视图间切换',
+  mainHtml.includes('data-view="preview"') && mainHtml.includes('data-view="tickets"'));
+check('原尺寸预览仍走无编辑属性的正式 HTML',
+  mainHtml.includes('generateExpenseReportHTML(draft, null, cfg) +'));
 check('人工修正持久化到下次生成',
   mainHtml.includes('saveExpenseReportOverrides') && mainHtml.includes('applyExpenseReportOverrides'));
 check('日期格式化改用本地年月日（修复少一天）', mainHtml.includes("getMonth() + 1).padStart(2, '0')"));
@@ -262,6 +518,23 @@ check('报销单在离屏沙箱里栅格化（主文档 980 条全局 CSS 会让
   mainHtml.includes('createReportSandbox') && mainHtml.includes('scale: rasterScale'));
 check('报销单图片走 JPEG 直传（跳过多 MB 的 base64 与二次 deflate）',
   mainHtml.includes("toBlob(res, 'image/jpeg'") && mainHtml.includes("'JPEG'"));
+check('金额输入框带 min="0"（键盘与上下箭头都填不进负数）',
+  (mainHtml.match(/class="erc-input erc-amount"[^>]*min="0"/g) || []).length >= 2);
+check('负数金额在写入草稿前被夹到 0',
+  mainHtml.includes('Math.max(0, v)') && mainHtml.includes('金额不能为负'));
+check('混合票在卡片上写明拆分到哪两列',
+  mainHtml.includes('混合票已按票面明细拆分'));
+check('拖拽只改归行日、不擅自合并混合票的拆分',
+  mainHtml.includes('function applyCategory(idx, cat)') &&
+  mainHtml.includes('if (Array.isArray(inv.splits) && inv.splits.length > 1) return;'));
+check('人工修正记录按文件指纹寻址（重传顺序变化不再错位）',
+  mainHtml.includes('findFileKeyByName') && mainHtml.includes('resolveOverride'));
+
+// 打包清单：真票诊断页会打印票面关键词与金额，只用于开发，不能随发行版分发
+const buildExeSrc = fs.readFileSync(path.join(__dirname, 'build-exe.js'), 'utf8');
+check('真票诊断页不打进 exe', !/const TOP = \[[^\]]*verify-trip-detection/.test(buildExeSrc));
+check('exe 仍嵌入主页面与静态资源',
+  /const TOP = \[[^\]]*'main\.html'/.test(buildExeSrc) && buildExeSrc.includes("walk('static')"));
 check('重识别改为增量（跳过已识别 PDF，避免反复生成全量重解析）',
   /!cache\[(?:name|key)\]\)/.test(mainHtml) && mainHtml.includes('refreshInvoiceRecognition'));
 
